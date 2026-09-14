@@ -1,44 +1,22 @@
-import Versions from './components/Versions'
-import electronLogo from './assets/electron.svg'
-import { useEffect } from 'react'
+import { App as AntdApp, theme } from 'antd'
+import { XProvider } from '@ant-design/x'
+import antdZhCN from 'antd/locale/zh_CN'
+import xZhCN from '@ant-design/x/locale/zh_CN'
+import { useSystemTheme } from './hooks/useSystemTheme'
+import ChatPage from './pages/chat'
 
 function App(): React.JSX.Element {
-  const ipcHandle = (): void => window.electron.ipcRenderer.send('ping')
-
-  useEffect(() => {
-    window.api.settings.getAll().then((res) => {
-      console.log('getAll', res)
-      if (!res.baseUrl) {
-        alert('请配置模型信息')
-      }
-    })
-  }, [])
+  const isDark = useSystemTheme()
 
   return (
-    <>
-      <img alt="logo" className="logo" src={electronLogo} />
-      <div className="creator">Powered by electron-vite</div>
-      <div className="text">
-        Build an Electron app with <span className="react">React</span>
-        &nbsp;and <span className="ts">TypeScript</span>
-      </div>
-      <p className="tip">
-        Please try pressing <code>F12</code> to open the devTool
-      </p>
-      <div className="actions">
-        <div className="action">
-          <a href="https://electron-vite.org/" target="_blank" rel="noreferrer">
-            Documentation
-          </a>
-        </div>
-        <div className="action">
-          <a target="_blank" rel="noreferrer" onClick={ipcHandle}>
-            Send IPC
-          </a>
-        </div>
-      </div>
-      <Versions></Versions>
-    </>
+    <XProvider
+      locale={{ ...antdZhCN, ...xZhCN }}
+      theme={{ algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm }}
+    >
+      <AntdApp style={{ height: '100%' }}>
+        <ChatPage />
+      </AntdApp>
+    </XProvider>
   )
 }
 

@@ -3,6 +3,7 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { registerIpc } from './ipc'
+import { abortAll } from './chat/service'
 
 function createWindow(): void {
   // Create the browser window.
@@ -61,6 +62,11 @@ app.whenReady().then(() => {
     // dock icon is clicked and there are no other windows open.
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+// 退出前中止所有进行中的模型请求,避免数据库关闭后仍在写入
+app.on('before-quit', () => {
+  abortAll()
 })
 
 // Quit when all windows are closed, except on macOS. There, it's common

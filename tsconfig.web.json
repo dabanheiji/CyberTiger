@@ -5,7 +5,10 @@
     "src/renderer/src/**/*",
     "src/renderer/src/**/*.tsx",
     "src/preload/*.d.ts",
-    "src/preload/router/index.ts",
+    "src/preload/router/**/*",
+    "src/main/chat/sql.ts",
+    "src/main/chat/dto.ts",
+    "src/main/store/types.ts"
   ],
   "compilerOptions": {
     "composite": true,
