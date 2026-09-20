@@ -4,6 +4,8 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { registerIpc } from './ipc'
 import { abortAll } from './chat/service'
+import { initMcp } from './mcp/controller'
+import { mcpManager } from './mcp/manager'
 
 function createWindow(): void {
   // Create the browser window.
@@ -54,6 +56,7 @@ app.whenReady().then(() => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
   registerIpc()
+  initMcp()
 
   createWindow()
 
@@ -64,9 +67,10 @@ app.whenReady().then(() => {
   })
 })
 
-// 退出前中止所有进行中的模型请求,避免数据库关闭后仍在写入
+// 退出前中止所有进行中的模型请求,避免数据库关闭后仍在写入;并关闭 MCP 子进程
 app.on('before-quit', () => {
   abortAll()
+  void mcpManager.closeAll()
 })
 
 // Quit when all windows are closed, except on macOS. There, it's common

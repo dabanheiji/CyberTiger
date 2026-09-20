@@ -1,3 +1,5 @@
+import type { ToolCallRecord } from './dto'
+
 export interface Conversation {
   id: string
   title: string
@@ -5,12 +7,24 @@ export interface Conversation {
   updated_at: string
 }
 
-export interface Message {
+export type MessageRole = 'user' | 'assistant' | 'system' | 'tool'
+
+/** 数据库原始行,tool_calls 是 JSON 字符串 */
+export interface MessageRow {
   id: string
   conversation_id: string
-  role: 'user' | 'assistant' | 'system'
+  role: MessageRole
   content: string
+  reasoning: string
+  tool_calls: string
+  tool_call_id: string
+  run_id: string
   created_at: string
+}
+
+/** 对外暴露的消息,tool_calls 已解析 */
+export interface Message extends Omit<MessageRow, 'tool_calls'> {
+  tool_calls: ToolCallRecord[]
 }
 
 export const chatSql = {
@@ -24,7 +38,14 @@ export const chatSql = {
   messages: {
     list: 'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC',
     add: 'INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
-    updateContent: 'UPDATE messages SET content = ? WHERE id = ?',
+    /** Agent 的一步:空 assistant 行占位 */
+    addAssistantStep:
+      "INSERT INTO messages (id, conversation_id, role, content, run_id) VALUES (?, ?, 'assistant', '', ?)",
+    /** 一步结束后写回正文、思考和工具调用 */
+    updateStep: 'UPDATE messages SET content = ?, reasoning = ?, tool_calls = ? WHERE id = ?',
+    /** 工具执行结果 */
+    addToolMessage:
+      "INSERT INTO messages (id, conversation_id, role, content, tool_call_id, run_id) VALUES (?, ?, 'tool', ?, ?, ?)",
     removeById: 'DELETE FROM messages WHERE id = ?',
     removeByConversation: 'DELETE FROM messages WHERE conversation_id = ?'
   }

@@ -1,3 +1,5 @@
+import type { McpConfig } from '../mcp/types'
+
 export interface AppSettings {
   baseUrl?: string
   apiKey?: string
@@ -5,4 +7,6 @@ export interface AppSettings {
   models?: string[]
   /** 聊天窗口当前选中的模型 ID */
   currentModel?: string
+  /** MCP server 配置,与 Claude Desktop 格式兼容 */
+  mcpServers?: McpConfig
 }

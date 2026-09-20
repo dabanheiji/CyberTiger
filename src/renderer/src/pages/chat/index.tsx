@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router'
 import { App, theme } from 'antd'
 import type { Conversation, Message } from '../../../../main/chat/sql'
 import type { AppSettings } from '../../../../main/store/types'
 import Sidebar from './Sidebar'
 import ChatPanel from './ChatPanel'
-import SettingsModal from '../../components/SettingsModal'
-import { useReplyStream } from '../../hooks/useReplyStream'
+import { useAgentStream } from '../../hooks/useAgentStream'
 
 function ChatPage(): React.JSX.Element {
   const { message, modal } = App.useApp()
   const { token } = theme.useToken()
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
 
   const [conversations, setConversations] = useState<Conversation[]>([])
   // null 表示"新对话"草稿态:还没有会话,发送首条消息时再创建
@@ -17,11 +19,14 @@ function ChatPage(): React.JSX.Element {
   const [messages, setMessages] = useState<Message[]>([])
   // 从用户点击发送到模型回复结束(或失败)期间为 true
   const [sending, setSending] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [models, setModels] = useState<string[]>([])
   const [currentModel, setCurrentModel] = useState<string | undefined>()
   // 与 activeId 同步的 ref,供异步回调判断返回结果是否仍属于当前会话
   const activeIdRef = useRef<string | null>(null)
+
+  const openSettings = useCallback((): void => {
+    navigate('/settings')
+  }, [navigate])
 
   const refreshConversations = useCallback(async (): Promise<void> => {
     const res = await window.api.chat.getAllConversations()
@@ -62,7 +67,7 @@ function ChatPage(): React.JSX.Element {
     streaming,
     start: startReply,
     abort: abortReply
-  } = useReplyStream({
+  } = useAgentStream({
     onDone: finishReply,
     onError: async (conversationId, msg) => {
       message.error(msg)
@@ -93,17 +98,22 @@ function ChatPage(): React.JSX.Element {
     return settings
   }, [])
 
-  // 首次挂载:加载会话列表和设置;未配置 baseUrl 时自动打开设置页
+  // 首次挂载:加载会话列表和设置;未配置 baseUrl 时自动进入设置页
   useEffect(() => {
     const init = async (): Promise<void> => {
       await refreshConversations()
       const settings = await loadSettings()
       if (!settings.baseUrl) {
-        setSettingsOpen(true)
+        openSettings()
       }
     }
     void init()
-  }, [refreshConversations, loadSettings])
+  }, [refreshConversations, loadSettings, openSettings])
+
+  // 从设置页返回时重新读取模型列表,反映刚保存的改动
+  useEffect(() => {
+    if (pathname === '/') void loadSettings()
+  }, [pathname, loadSettings])
 
   const handleModelChange = async (model: string): Promise<void> => {
     setCurrentModel(model)
@@ -119,7 +129,7 @@ function ChatPage(): React.JSX.Element {
     if (!text || sending) return
     if (!currentModel) {
       message.warning('请先选择模型')
-      setSettingsOpen(true)
+      openSettings()
       return
     }
     setSending(true)
@@ -201,7 +211,7 @@ function ChatPage(): React.JSX.Element {
         onNew={newConversation}
         onRename={handleRename}
         onDelete={handleDelete}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={openSettings}
       />
       <ChatPanel
         messages={messages}
@@ -214,12 +224,7 @@ function ChatPage(): React.JSX.Element {
         onSend={handleSend}
         onCancel={handleCancel}
         onModelChange={handleModelChange}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
-      <SettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        onSaved={loadSettings}
+        onOpenSettings={openSettings}
       />
     </div>
   )

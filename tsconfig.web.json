@@ -8,6 +8,7 @@
     "src/preload/router/**/*",
     "src/main/chat/sql.ts",
     "src/main/chat/dto.ts",
+    "src/main/mcp/types.ts",
     "src/main/store/types.ts"
   ],
   "compilerOptions": {

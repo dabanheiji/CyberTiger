@@ -10,6 +10,7 @@ import {
   generateReply,
   abortReply
 } from '../chat/controller'
+import { getStatus as mcpGetStatus, saveConfig as mcpSaveConfig, reload as mcpReload } from '../mcp/controller'
 
 export function registerIpc(): void {
   ipcMain.handle('settings:get', get)
@@ -25,4 +26,8 @@ export function registerIpc(): void {
   ipcMain.handle('chat:removeConversation', removeConversation)
   ipcMain.handle('chat:generateReply', generateReply)
   ipcMain.handle('chat:abortReply', abortReply)
+
+  ipcMain.handle('mcp:getStatus', mcpGetStatus)
+  ipcMain.handle('mcp:saveConfig', mcpSaveConfig)
+  ipcMain.handle('mcp:reload', mcpReload)
 }

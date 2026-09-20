@@ -22,11 +22,11 @@ export default {
     ipcRenderer.invoke('chat:renameConversation', dto),
   removeConversation: (conversationId: string): Promise<IpcResult<null>> =>
     ipcRenderer.invoke('chat:removeConversation', conversationId),
-  /** 触发模型生成回复,返回占位的助手消息 id;增量通过 onStream 推送 */
-  generateReply: (dto: generateReplyDto): Promise<IpcResult<{ messageId: string }>> =>
+  /** 启动一次 Agent run,返回 runId;各步事件通过 onStream 推送 */
+  generateReply: (dto: generateReplyDto): Promise<IpcResult<{ runId: string }>> =>
     ipcRenderer.invoke('chat:generateReply', dto),
-  abortReply: (messageId: string): Promise<IpcResult<null>> =>
-    ipcRenderer.invoke('chat:abortReply', messageId),
+  abortReply: (runId: string): Promise<IpcResult<null>> =>
+    ipcRenderer.invoke('chat:abortReply', runId),
   /** 订阅流式事件,返回取消订阅函数 */
   onStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)

@@ -76,17 +76,17 @@ export function removeConversation(
 export function generateReply(
   e: IpcMainInvokeEvent,
   dto: generateReplyDto
-): IpcResult<{ messageId: string }> {
+): IpcResult<{ runId: string }> {
   const emit = (event: ChatStreamEvent): void => {
     // 窗口已关闭时不再推送,但落库照常完成
     if (!e.sender.isDestroyed()) e.sender.send('chat:stream', event)
   }
-  return run(() => ({ messageId: generateReplyService(dto, emit) }))
+  return run(() => ({ runId: generateReplyService(dto, emit) }))
 }
 
-export function abortReply(_e: IpcMainInvokeEvent, messageId: string): IpcResult<null> {
+export function abortReply(_e: IpcMainInvokeEvent, runId: string): IpcResult<null> {
   return run(() => {
-    abortReplyService(messageId)
+    abortReplyService(runId)
     return null
   })
 }
