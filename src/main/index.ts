@@ -7,12 +7,17 @@ import { abortAll } from './chat/service'
 import { initMcp } from './mcp/controller'
 import { mcpManager } from './mcp/manager'
 import { initSkills } from './skills/controller'
+import { loadWindowState, trackWindowState } from './window-state'
 
 function createWindow(): void {
+  // 上次退出时的窗口大小/位置;没有记录时用默认尺寸
+  const state = loadWindowState()
+
   // Create the browser window.
   const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
+    width: state.width,
+    height: state.height,
+    ...(state.x !== undefined && state.y !== undefined ? { x: state.x, y: state.y } : {}),
     show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
@@ -22,7 +27,11 @@ function createWindow(): void {
     }
   })
 
+  trackWindowState(mainWindow)
+
   mainWindow.on('ready-to-show', () => {
+    // 先还原最大化再显示,避免先闪一下普通尺寸
+    if (state.isMaximized) mainWindow.maximize()
     mainWindow.show()
   })
 

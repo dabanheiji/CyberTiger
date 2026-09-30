@@ -13,6 +13,7 @@ export const store = new Store<AppSettings>({
     baseUrl: undefined,
     apiKey: undefined,
     models: [],
-    currentModel: undefined
+    currentModel: undefined,
+    windowState: undefined
   }
 })
