@@ -1,10 +1,14 @@
 export interface createFirstMessageDto {
   content: string
+  /** 通过 / 触发的 skill 名 */
+  skill?: string
 }
 
 export interface sendMessageDto {
   conversationId: string
   content: string
+  /** 通过 / 触发的 skill 名 */
+  skill?: string
 }
 
 export interface renameConversationDto {

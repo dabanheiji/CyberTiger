@@ -11,6 +11,7 @@ import {
   abortReply
 } from '../chat/controller'
 import { getStatus as mcpGetStatus, saveConfig as mcpSaveConfig, reload as mcpReload } from '../mcp/controller'
+import * as skills from '../skills/controller'
 
 export function registerIpc(): void {
   ipcMain.handle('settings:get', get)
@@ -30,4 +31,14 @@ export function registerIpc(): void {
   ipcMain.handle('mcp:getStatus', mcpGetStatus)
   ipcMain.handle('mcp:saveConfig', mcpSaveConfig)
   ipcMain.handle('mcp:reload', mcpReload)
+
+  ipcMain.handle('skills:list', skills.list)
+  ipcMain.handle('skills:setEnabled', skills.setEnabled)
+  ipcMain.handle('skills:openDir', skills.openDir)
+  ipcMain.handle('skills:discover', skills.discover)
+  ipcMain.handle('skills:importLocal', skills.importLocal)
+  ipcMain.handle('skills:install', skills.install)
+  ipcMain.handle('skills:cancel', skills.cancel)
+  ipcMain.handle('skills:uninstall', skills.uninstall)
+  ipcMain.handle('skills:update', skills.update)
 }

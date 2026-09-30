@@ -30,3 +30,29 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/*
+ * skill 选择弹层(见 ChatPanel 的 Suggestion classNames.popup)。
+ * antd 给 .ant-cascader-menu-item 硬编码 max-width:400px,而 .ant-cascader-menu 是
+ * flex-shrink:0 + 内容宽度,导致只改 menu-item 无法铺满(100% 会退化成无约束,文本被硬裁)。
+ * 这里把弹层根已有的确定宽度(=输入框宽度)逐层传下去,span 的 ellipsis 才能正常生效。
+ */
+.cybertiger-skill-dropdown .ant-cascader-menus {
+  width: 100%;
+}
+
+.cybertiger-skill-dropdown .ant-cascader-menu {
+  width: 100%;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.cybertiger-skill-dropdown .ant-cascader-menu-item {
+  width: 100%;
+  max-width: none;
+}
+
+/* flex item 默认 min-width:auto 会撑破宽度链,显式归零 */
+.cybertiger-skill-dropdown .ant-suggestion-item {
+  min-width: 0;
+}

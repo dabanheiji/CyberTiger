@@ -1,12 +1,13 @@
 import type OpenAI from 'openai'
 import type { ToolDefinition, ToolExecResult } from './types'
 import { getCurrentTimeTool } from './time'
+import { skillTools } from '../skills/tools'
 import { mcpManager } from '../mcp/manager'
 
 export type { ToolDefinition, ToolExecResult } from './types'
 
 /** 内置工具;新增内置工具在这里注册 */
-export const builtinTools: ToolDefinition[] = [getCurrentTimeTool]
+export const builtinTools: ToolDefinition[] = [getCurrentTimeTool, ...skillTools]
 
 /** 当前全部可用工具:内置 + 已连接的 MCP server 提供的。每次调用实时计算 */
 export function getAllTools(): ToolDefinition[] {

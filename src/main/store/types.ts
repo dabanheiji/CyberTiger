@@ -9,4 +9,8 @@ export interface AppSettings {
   currentModel?: string
   /** MCP server 配置,与 Claude Desktop 格式兼容 */
   mcpServers?: McpConfig
+  /** 已禁用的 skill 名称 */
+  disabledSkills?: string[]
+  /** 下载私有仓库 skill 时使用;暂无设置 UI */
+  githubToken?: string
 }

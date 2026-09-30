@@ -124,7 +124,7 @@ function ChatPage(): React.JSX.Element {
     }
   }
 
-  const handleSend = async (content: string): Promise<void> => {
+  const handleSend = async (content: string, skillName?: string): Promise<void> => {
     const text = content.trim()
     if (!text || sending) return
     if (!currentModel) {
@@ -137,7 +137,7 @@ function ChatPage(): React.JSX.Element {
       // 1. 用户消息落库并刷新列表
       let conversationId = activeIdRef.current
       if (conversationId === null) {
-        const res = await window.api.chat.sendFirstMessage({ content: text })
+        const res = await window.api.chat.sendFirstMessage({ content: text, skill: skillName })
         if (!res.success) {
           message.error(res.msg)
           setSending(false)
@@ -147,7 +147,11 @@ function ChatPage(): React.JSX.Element {
         await refreshConversations()
         await selectConversation(conversationId)
       } else {
-        const res = await window.api.chat.sendMessage({ conversationId, content: text })
+        const res = await window.api.chat.sendMessage({
+          conversationId,
+          content: text,
+          skill: skillName
+        })
         if (!res.success) {
           message.error(res.msg)
           setSending(false)

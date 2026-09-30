@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS messages (
   tool_call_id    TEXT NOT NULL DEFAULT '',
   -- 同一次提问产生的所有行共享,供 UI 合并成一个气泡
   run_id          TEXT NOT NULL DEFAULT '',
+  -- user 行:通过 / 触发的 skill 名,发送给模型时展开为完整指令
+  skill           TEXT NOT NULL DEFAULT '',
   created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -51,6 +53,11 @@ export const columnMigrations: { table: string; column: string; ddl: string }[] 
     table: 'messages',
     column: 'run_id',
     ddl: "ALTER TABLE messages ADD COLUMN run_id TEXT NOT NULL DEFAULT ''"
+  },
+  {
+    table: 'messages',
+    column: 'skill',
+    ddl: "ALTER TABLE messages ADD COLUMN skill TEXT NOT NULL DEFAULT ''"
   }
 ]
 
@@ -77,10 +84,11 @@ export const tableRebuilds: {
         tool_calls      TEXT NOT NULL DEFAULT '[]',
         tool_call_id    TEXT NOT NULL DEFAULT '',
         run_id          TEXT NOT NULL DEFAULT '',
+        skill           TEXT NOT NULL DEFAULT '',
         created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
       );
-      INSERT INTO messages_new (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, created_at)
-        SELECT id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, created_at FROM messages;
+      INSERT INTO messages_new (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, created_at)
+        SELECT id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, created_at FROM messages;
       DROP TABLE messages;
       ALTER TABLE messages_new RENAME TO messages;
       CREATE INDEX IF NOT EXISTS idx_messages_conversation_created

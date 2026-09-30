@@ -3,6 +3,7 @@ import { Button, Divider, Typography, theme } from 'antd'
 import { ArrowLeftOutlined } from '@ant-design/icons'
 import ModelServiceForm from './ModelServiceForm'
 import McpConfigEditor from './McpConfigEditor'
+import SkillsPanel from './SkillsPanel'
 
 function SettingsPage(): React.JSX.Element {
   const navigate = useNavigate()
@@ -35,6 +36,11 @@ function SettingsPage(): React.JSX.Element {
 
         <Typography.Title level={4}>MCP 服务</Typography.Title>
         <McpConfigEditor />
+
+        <Divider />
+
+        <Typography.Title level={4}>Skills</Typography.Title>
+        <SkillsPanel />
       </div>
     </div>
   )

@@ -6,6 +6,7 @@ import { registerIpc } from './ipc'
 import { abortAll } from './chat/service'
 import { initMcp } from './mcp/controller'
 import { mcpManager } from './mcp/manager'
+import { initSkills } from './skills/controller'
 
 function createWindow(): void {
   // Create the browser window.
@@ -57,6 +58,7 @@ app.whenReady().then(() => {
   ipcMain.on('ping', () => console.log('pong'))
   registerIpc()
   initMcp()
+  initSkills()
 
   createWindow()
 

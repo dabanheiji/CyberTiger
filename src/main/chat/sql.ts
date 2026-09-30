@@ -19,6 +19,8 @@ export interface MessageRow {
   tool_calls: string
   tool_call_id: string
   run_id: string
+  /** user 行:通过 / 触发的 skill 名;空串表示无 */
+  skill: string
   created_at: string
 }
 
@@ -37,7 +39,7 @@ export const chatSql = {
   },
   messages: {
     list: 'SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC',
-    add: 'INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, ?, ?)',
+    add: 'INSERT INTO messages (id, conversation_id, role, content, skill) VALUES (?, ?, ?, ?, ?)',
     /** Agent 的一步:空 assistant 行占位 */
     addAssistantStep:
       "INSERT INTO messages (id, conversation_id, role, content, run_id) VALUES (?, ?, 'assistant', '', ?)",

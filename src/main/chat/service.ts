@@ -67,9 +67,12 @@ export function createMessage(
   messageId: string,
   conversationId: string,
   role: Message['role'],
-  content: string
+  content: string,
+  skill = ''
 ): Database.RunResult {
-  return getDb().prepare(chatSql.messages.add).run(messageId, conversationId, role, content)
+  return getDb()
+    .prepare(chatSql.messages.add)
+    .run(messageId, conversationId, role, content, skill)
 }
 
 export function removeMessage(id: string): Database.RunResult {
@@ -84,7 +87,7 @@ export function createFirstMessage(dto: createFirstMessageDto): string {
 
   const createChat = getDb().transaction(() => {
     createConversation(conversationId, title)
-    createMessage(messageId, conversationId, 'user', dto.content)
+    createMessage(messageId, conversationId, 'user', dto.content, dto.skill ?? '')
   })
 
   createChat()
@@ -96,7 +99,7 @@ export function sendMessage(dto: sendMessageDto): string {
   const messageId = uuidv4()
 
   const appendMessage = getDb().transaction(() => {
-    createMessage(messageId, dto.conversationId, 'user', dto.content)
+    createMessage(messageId, dto.conversationId, 'user', dto.content, dto.skill ?? '')
     resortConversation(dto.conversationId)
   })
 
