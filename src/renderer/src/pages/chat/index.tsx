@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { App, theme } from 'antd'
 import type { Conversation, Message } from '../../../../main/chat/sql'
-import type { AppSettings } from '../../../../main/store/types'
+import type { AppSettings, ModelProvider, ModelRef } from '../../../../main/store/types'
+import { normalizeRef } from '../../../../main/store/modelRef'
 import Sidebar from './Sidebar'
 import ChatPanel from './ChatPanel'
 import { useAgentStream } from '../../hooks/useAgentStream'
@@ -19,8 +20,8 @@ function ChatPage(): React.JSX.Element {
   const [messages, setMessages] = useState<Message[]>([])
   // 从用户点击发送到模型回复结束(或失败)期间为 true
   const [sending, setSending] = useState(false)
-  const [models, setModels] = useState<string[]>([])
-  const [currentModel, setCurrentModel] = useState<string | undefined>()
+  const [providers, setProviders] = useState<ModelProvider[]>([])
+  const [currentRef, setCurrentRef] = useState<ModelRef | undefined>()
   // 与 activeId 同步的 ref,供异步回调判断返回结果是否仍属于当前会话
   const activeIdRef = useRef<string | null>(null)
 
@@ -93,8 +94,10 @@ function ChatPage(): React.JSX.Element {
   // 读取设置里的模型列表和当前模型,返回完整设置供调用方使用
   const loadSettings = useCallback(async (): Promise<AppSettings> => {
     const settings = await window.api.settings.getAll()
-    setModels(settings.models ?? [])
-    setCurrentModel(settings.currentModel)
+    const list = settings.providers ?? []
+    setProviders(list)
+    // 服务商被删、模型被移出清单时收敛到一个可用值,避免选择器停在悬空引用上
+    setCurrentRef(normalizeRef(settings.currentModel, list))
     return settings
   }, [])
 
@@ -103,7 +106,8 @@ function ChatPage(): React.JSX.Element {
     const init = async (): Promise<void> => {
       await refreshConversations()
       const settings = await loadSettings()
-      if (!settings.baseUrl) {
+      // 一个服务商都没配过:直接把人带到设置页
+      if ((settings.providers ?? []).length === 0) {
         openSettings()
       }
     }
@@ -115,10 +119,10 @@ function ChatPage(): React.JSX.Element {
     if (pathname === '/') void loadSettings()
   }, [pathname, loadSettings])
 
-  const handleModelChange = async (model: string): Promise<void> => {
-    setCurrentModel(model)
+  const handleModelChange = async (ref: ModelRef): Promise<void> => {
+    setCurrentRef(ref)
     try {
-      await window.api.settings.set('currentModel', model)
+      await window.api.settings.set('currentModel', ref)
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err))
     }
@@ -127,7 +131,7 @@ function ChatPage(): React.JSX.Element {
   const handleSend = async (content: string, skillName?: string): Promise<void> => {
     const text = content.trim()
     if (!text || sending) return
-    if (!currentModel) {
+    if (!currentRef) {
       message.warning('请先选择模型')
       openSettings()
       return
@@ -160,7 +164,7 @@ function ChatPage(): React.JSX.Element {
         await Promise.all([loadMessages(conversationId), refreshConversations()])
       }
       // 2. 触发模型回复;成功后 sending 由流结束事件解除
-      const started = await startReply(conversationId, currentModel)
+      const started = await startReply(conversationId, currentRef)
       if (!started.success) {
         message.error(started.msg)
         setSending(false)
@@ -223,8 +227,8 @@ function ChatPage(): React.JSX.Element {
         streaming={streaming?.conversationId === activeId ? streaming : null}
         isDraft={activeId === null}
         sending={sending}
-        models={models}
-        currentModel={currentModel}
+        providers={providers}
+        currentRef={currentRef}
         onSend={handleSend}
         onCancel={handleCancel}
         onModelChange={handleModelChange}

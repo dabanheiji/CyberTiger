@@ -3,12 +3,19 @@ import { Bubble, Sender, Suggestion, Welcome } from '@ant-design/x'
 import type { BubbleListProps } from '@ant-design/x'
 import XMarkdown from '@ant-design/x-markdown'
 import { Avatar, Button, Flex, Select, Tag, theme } from 'antd'
-import { RobotOutlined, SettingOutlined, ThunderboltOutlined, UserOutlined } from '@ant-design/icons'
+import {
+  RobotOutlined,
+  SettingOutlined,
+  ThunderboltOutlined,
+  UserOutlined
+} from '@ant-design/icons'
 import type { Message } from '../../../../main/chat/sql'
+import type { ModelProvider, ModelRef } from '../../../../main/store/types'
+import { modelKey, parseModelKey } from '../../lib/modelRef'
 import type { AgentStep, StreamingRun, StreamingToolCall } from '../../hooks/useAgentStream'
+import { attachToolResult, finalizeStep, findCall } from '../../lib/agentSteps'
 import { useSkills } from '../../hooks/useSkills'
-import ReasoningBox from '../../components/ReasoningBox'
-import ToolCallChain from '../../components/ToolCallChain'
+import AgentSteps from '../../components/AgentSteps'
 
 /** 交给气泡 contentRender 的内容 */
 interface UserBubbleContent {
@@ -29,14 +36,14 @@ interface ChatPanelProps {
   /** 草稿态:尚未创建会话,显示欢迎页 */
   isDraft: boolean
   sending: boolean
-  /** 设置里配置的模型 ID 列表 */
-  models: string[]
-  currentModel?: string
+  /** 已配置的模型服务商(选择器按服务商分组) */
+  providers: ModelProvider[]
+  currentRef?: ModelRef
   /** skillName 为通过 / 选择的 skill,未选择时为 undefined */
   onSend: (content: string, skillName?: string) => void
   /** 用户点击停止按钮 */
   onCancel: () => void
-  onModelChange: (model: string) => void
+  onModelChange: (ref: ModelRef) => void
   onOpenSettings: () => void
 }
 
@@ -65,50 +72,64 @@ const roles: BubbleListProps['role'] = {
     placement: 'start',
     variant: 'outlined',
     avatar: <Avatar icon={<RobotOutlined />} />,
-    // 逐步渲染:每步依次是思考框、工具调用链、正文
-    contentRender: (msg: AssistantBubbleContent) => {
-      const lastIndex = msg.steps.length - 1
-      return (
-        <>
-          {msg.steps.map((step, i) => {
-            // 正在思考 = 流式中的最后一步,且尚未输出正文或发起行动
-            const thinking =
-              msg.streaming && i === lastIndex && !step.content && step.toolCalls.length === 0
-            return (
-              <div key={step.messageId}>
-                {!!step.reasoning && (
-                  <ReasoningBox reasoning={step.reasoning} thinking={thinking} />
-                )}
-                {step.toolCalls.length > 0 && <ToolCallChain calls={step.toolCalls} />}
-                {!!step.content && <XMarkdown content={step.content} />}
-              </div>
-            )
-          })}
-        </>
-      )
-    }
+    contentRender: (msg: AssistantBubbleContent) => (
+      <AgentSteps steps={msg.steps} streaming={msg.streaming} />
+    )
   }
+}
+
+/** 一个气泡分组:user 行自成一组,同一 run 的 assistant / tool 行合并成助手组 */
+interface MessageGroup {
+  key: string
+  runId: string
+  steps: AgentStep[]
+  role: 'user' | 'assistant'
+  skill: string
+}
+
+/** 库内一行 → Agent 的一步;落库的调用没有独立状态,先标为未完成 */
+function toAgentStep(m: Message): AgentStep {
+  return {
+    messageId: m.id,
+    content: m.content,
+    reasoning: m.reasoning,
+    toolCalls: m.tool_calls.map((c) => ({ ...c, status: 'running' as const }))
+  }
+}
+
+/** 在全部已分组的结果里递归查找某个工具调用;子 Agent 的行据此挂载 */
+function findCallInGroups(groups: MessageGroup[], callId: string): StreamingToolCall | undefined {
+  for (const group of groups) {
+    const hit = findCall(group.steps, callId)
+    if (hit) return hit
+  }
+  return undefined
 }
 
 /**
  * 把库里按协议逐条存放的消息合并成气泡项:
  * user 行单独一个气泡;同一 run 内的 assistant / tool 行合并成一个助手气泡,
- * tool 行的结果挂到对应的工具调用上。
+ * tool 行的结果挂到对应的工具调用上;
+ * 子 Agent 的行挂在发起它的那次 task 调用下面,不参与顶层分组。
  */
-function groupMessages(
-  messages: Message[]
-): { key: string; runId: string; steps: AgentStep[]; skill: string }[] {
-  type Group = {
-    key: string
-    runId: string
-    steps: AgentStep[]
-    role: 'user' | 'assistant'
-    skill: string
-  }
-  const groups: Group[] = []
-  let current: Group | null = null
+function groupMessages(messages: Message[]): MessageGroup[] {
+  const groups: MessageGroup[] = []
+  let current: MessageGroup | null = null
 
   for (const m of messages) {
+    // 子 Agent 的行:找到承载它的 task 调用,往那个调用的 agentSteps 里塞
+    if (m.parent_call_id) {
+      const host = findCallInGroups(groups, m.parent_call_id)
+      // 父级行缺失(会话数据被改坏)时跳过,不影响其余内容展示
+      if (!host) continue
+      // 角色名落在每一行上,据此恢复标注(通用角色为空串)
+      if (m.agent) host.agentName = m.agent
+      const nested = (host.agentSteps ??= [])
+      if (m.role === 'assistant') nested.push(toAgentStep(m))
+      else if (m.role === 'tool') attachToolResult(nested, m.tool_call_id, m.content)
+      continue
+    }
+
     if (m.role === 'user' || m.role === 'system') {
       groups.push({
         key: m.id,
@@ -127,13 +148,7 @@ function groupMessages(
       groups.push(current)
     }
     if (m.role === 'assistant') {
-      current.steps.push({
-        messageId: m.id,
-        content: m.content,
-        reasoning: m.reasoning,
-        // 落库的调用没有独立状态,能找到对应 tool 行的算完成,否则视为未完成
-        toolCalls: m.tool_calls.map((c) => ({ ...c, status: 'running' as const }))
-      })
+      current.steps.push(toAgentStep(m))
     } else {
       attachToolResult(current.steps, m.tool_call_id, m.content)
     }
@@ -142,30 +157,10 @@ function groupMessages(
   return groups.map(({ key, runId, steps, role, skill }) => ({
     key,
     runId,
+    role,
     skill,
     steps: role === 'user' ? steps : steps.map(finalizeStep)
   }))
-}
-
-/** tool 行:从最近的一步往前找对应的调用并填入结果 */
-function attachToolResult(steps: AgentStep[], toolCallId: string, result: string): void {
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const idx = steps[i].toolCalls.findIndex((c) => c.id === toolCallId)
-    if (idx === -1) continue
-    steps[i].toolCalls[idx] = { ...steps[i].toolCalls[idx], status: 'success', result }
-    return
-  }
-}
-
-/** 落库数据里仍是 running 的调用说明当时被中止,标为失败 */
-function finalizeStep(step: AgentStep): AgentStep {
-  return {
-    ...step,
-    toolCalls: step.toolCalls.map(
-      (c): StreamingToolCall =>
-        c.status === 'running' ? { ...c, status: 'error', result: '已中止' } : c
-    )
-  }
 }
 
 function ChatPanel({
@@ -173,8 +168,8 @@ function ChatPanel({
   streaming,
   isDraft,
   sending,
-  models,
-  currentModel,
+  providers,
+  currentRef,
   onSend,
   onCancel,
   onModelChange,
@@ -186,6 +181,8 @@ function ChatPanel({
   const [activeSkill, setActiveSkill] = useState<string | null>(null)
   const skills = useSkills()
   const enabledSkills = skills.filter((s) => s.enabled && !s.error)
+  // 没有模型的服务商不参与选择,否则会多出一个空的分组标题
+  const selectable = providers.filter((p) => p.models.length > 0)
 
   const userIds = new Set(messages.filter((m) => m.role === 'user').map((m) => m.id))
   const items: BubbleListProps['items'] = groupMessages(messages).map((g) => {
@@ -339,18 +336,31 @@ function ChatPanel({
               suffix={false}
               footer={(actions) => (
                 <Flex justify="space-between" align="center">
-                  {models.length > 0 ? (
+                  {selectable.length > 0 ? (
                     <Select<string>
                       size="small"
                       variant="borderless"
-                      value={currentModel}
+                      value={currentRef ? modelKey(currentRef) : undefined}
                       placeholder="选择模型"
-                      options={models.map((m) => ({ value: m, label: m }))}
-                      onChange={onModelChange}
+                      // 按服务商分组;同名模型分属不同服务商时靠分组标题区分
+                      options={selectable.map((p) => ({
+                        label: p.name,
+                        options: p.models.map((model) => ({
+                          value: modelKey({ providerId: p.id, model }),
+                          label: model
+                        }))
+                      }))}
+                      onChange={(key) => onModelChange(parseModelKey(key))}
+                      // 收起时补上服务商名,否则只看到一个 model id 分不清是哪家
+                      labelRender={({ value }) => {
+                        const ref = value === undefined ? undefined : parseModelKey(String(value))
+                        const provider = providers.find((p) => p.id === ref?.providerId)
+                        return provider && ref ? `${provider.name} · ${ref.model}` : String(value)
+                      }}
                       // 回复途中不允许切模型
                       disabled={sending}
                       popupMatchSelectWidth={false}
-                      style={{ minWidth: 140 }}
+                      style={{ minWidth: 160 }}
                     />
                   ) : (
                     <Button

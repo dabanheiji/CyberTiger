@@ -10,9 +10,7 @@ const Store: ElectronStore = (ElectronStore as any).default || ElectronStore
 export const store = new Store<AppSettings>({
   name: 'config',
   defaults: {
-    baseUrl: undefined,
-    apiKey: undefined,
-    models: [],
+    providers: [],
     currentModel: undefined,
     windowState: undefined
   }

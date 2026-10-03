@@ -1,4 +1,4 @@
-import { parse as parseYaml } from 'yaml'
+import { asOptionalString, parseFrontmatter, validateName } from '../shared/frontmatter'
 
 export interface ParsedSkill {
   name: string
@@ -9,53 +9,14 @@ export interface ParsedSkill {
   body: string
 }
 
-const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/
-
-/** 拆出 frontmatter 与正文;文件必须以 --- 开头 */
-function splitFrontmatter(content: string): { yaml: string; body: string } {
-  const normalized = content.replace(/^﻿/, '').replace(/\r\n/g, '\n')
-  if (!normalized.startsWith('---\n')) throw new Error('SKILL.md 必须以 YAML frontmatter(---)开头')
-  const end = normalized.indexOf('\n---', 4)
-  if (end === -1) throw new Error('frontmatter 缺少结束的 ---')
-  return {
-    yaml: normalized.slice(4, end),
-    body: normalized.slice(end + 4).replace(/^\n/, '')
-  }
-}
-
-function asOptionalString(value: unknown, field: string, max: number): string | undefined {
-  if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string') throw new Error(`${field} 必须是字符串`)
-  if (value.length > max) throw new Error(`${field} 不能超过 ${max} 个字符`)
-  return value
-}
-
 /**
  * 解析并按 Agent Skills 规范校验 SKILL.md。
  * dirName 用于校验 name 与目录名一致;传 undefined 时跳过该项。
  */
 export function parseSkillFile(content: string, dirName?: string): ParsedSkill {
-  const { yaml, body } = splitFrontmatter(content)
-  let fm: unknown
-  try {
-    fm = parseYaml(yaml)
-  } catch (error) {
-    throw new Error(`frontmatter 不是合法的 YAML:${error instanceof Error ? error.message : String(error)}`)
-  }
-  if (fm === null || typeof fm !== 'object' || Array.isArray(fm)) {
-    throw new Error('frontmatter 必须是键值映射')
-  }
-  const data = fm as Record<string, unknown>
+  const { data, body } = parseFrontmatter(content)
 
-  const name = data.name
-  if (typeof name !== 'string' || name.length === 0) throw new Error('缺少 name')
-  if (name.length > 64) throw new Error('name 不能超过 64 个字符')
-  if (!NAME_RE.test(name)) {
-    throw new Error('name 只能包含小写字母、数字和连字符,不能以连字符开头/结尾或连续出现')
-  }
-  if (dirName !== undefined && name !== dirName) {
-    throw new Error(`name "${name}" 必须与目录名 "${dirName}" 一致`)
-  }
+  const name = validateName(data.name, dirName)
 
   const description = data.description
   if (typeof description !== 'string' || description.trim().length === 0) {

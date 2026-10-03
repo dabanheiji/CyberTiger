@@ -7,6 +7,8 @@ import { abortAll } from './chat/service'
 import { initMcp } from './mcp/controller'
 import { mcpManager } from './mcp/manager'
 import { initSkills } from './skills/controller'
+import { initAgents } from './agents/controller'
+import { migrateSettings } from './store/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
 
 function createWindow(): void {
@@ -65,9 +67,13 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
+  // 先迁移配置结构,后面的初始化与窗口都按新结构读
+  migrateSettings()
+
   registerIpc()
   initMcp()
   initSkills()
+  initAgents()
 
   createWindow()
 

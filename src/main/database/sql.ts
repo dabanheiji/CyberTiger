@@ -18,10 +18,16 @@ CREATE TABLE IF NOT EXISTS messages (
   tool_calls      TEXT NOT NULL DEFAULT '[]',
   -- tool 行对应的调用 id
   tool_call_id    TEXT NOT NULL DEFAULT '',
-  -- 同一次提问产生的所有行共享,供 UI 合并成一个气泡
+  -- 同一次提问产生的所有行共享,供 UI 合并成一个气泡;子 agent 沿用父级的 run_id
   run_id          TEXT NOT NULL DEFAULT '',
   -- user 行:通过 / 触发的 skill 名,发送给模型时展开为完整指令
   skill           TEXT NOT NULL DEFAULT '',
+  -- 产生该行的角色名;空串表示主 agent,仅用于展示与排障
+  agent           TEXT NOT NULL DEFAULT '',
+  -- 该行归属的父级工具调用 id;空串表示顶层。子 agent 的行靠它挂到那次 task 调用下
+  parent_call_id  TEXT NOT NULL DEFAULT '',
+  -- 嵌套深度:0 = 主 agent,1 = 子 agent
+  depth           INTEGER NOT NULL DEFAULT 0,
   created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -58,6 +64,21 @@ export const columnMigrations: { table: string; column: string; ddl: string }[] 
     table: 'messages',
     column: 'skill',
     ddl: "ALTER TABLE messages ADD COLUMN skill TEXT NOT NULL DEFAULT ''"
+  },
+  {
+    table: 'messages',
+    column: 'agent',
+    ddl: "ALTER TABLE messages ADD COLUMN agent TEXT NOT NULL DEFAULT ''"
+  },
+  {
+    table: 'messages',
+    column: 'parent_call_id',
+    ddl: "ALTER TABLE messages ADD COLUMN parent_call_id TEXT NOT NULL DEFAULT ''"
+  },
+  {
+    table: 'messages',
+    column: 'depth',
+    ddl: 'ALTER TABLE messages ADD COLUMN depth INTEGER NOT NULL DEFAULT 0'
   }
 ]
 
@@ -85,10 +106,13 @@ export const tableRebuilds: {
         tool_call_id    TEXT NOT NULL DEFAULT '',
         run_id          TEXT NOT NULL DEFAULT '',
         skill           TEXT NOT NULL DEFAULT '',
+        agent           TEXT NOT NULL DEFAULT '',
+        parent_call_id  TEXT NOT NULL DEFAULT '',
+        depth           INTEGER NOT NULL DEFAULT 0,
         created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
       );
-      INSERT INTO messages_new (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, created_at)
-        SELECT id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, created_at FROM messages;
+      INSERT INTO messages_new (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, created_at)
+        SELECT id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, created_at FROM messages;
       DROP TABLE messages;
       ALTER TABLE messages_new RENAME TO messages;
       CREATE INDEX IF NOT EXISTS idx_messages_conversation_created

@@ -10,8 +10,13 @@ import {
   generateReply,
   abortReply
 } from '../chat/controller'
-import { getStatus as mcpGetStatus, saveConfig as mcpSaveConfig, reload as mcpReload } from '../mcp/controller'
+import {
+  getStatus as mcpGetStatus,
+  saveConfig as mcpSaveConfig,
+  reload as mcpReload
+} from '../mcp/controller'
 import * as skills from '../skills/controller'
+import * as agents from '../agents/controller'
 
 export function registerIpc(): void {
   ipcMain.handle('settings:get', get)
@@ -41,4 +46,12 @@ export function registerIpc(): void {
   ipcMain.handle('skills:cancel', skills.cancel)
   ipcMain.handle('skills:uninstall', skills.uninstall)
   ipcMain.handle('skills:update', skills.update)
+
+  ipcMain.handle('agents:list', agents.list)
+  ipcMain.handle('agents:setEnabled', agents.setEnabled)
+  ipcMain.handle('agents:openDir', agents.openDir)
+  ipcMain.handle('agents:listTools', agents.listTools)
+  ipcMain.handle('agents:create', agents.create)
+  ipcMain.handle('agents:update', agents.update)
+  ipcMain.handle('agents:remove', agents.remove)
 }

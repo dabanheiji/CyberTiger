@@ -10,7 +10,9 @@
     "src/main/chat/dto.ts",
     "src/main/mcp/types.ts",
     "src/main/skills/types.ts",
-    "src/main/store/types.ts"
+    "src/main/agents/types.ts",
+    "src/main/store/types.ts",
+    "src/main/store/modelRef.ts"
   ],
   "compilerOptions": {
     "composite": true,

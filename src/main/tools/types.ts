@@ -1,5 +1,14 @@
 import type OpenAI from 'openai'
 
+/** 一次工具调用的上下文,由 Agent loop 在调用点注入 */
+export interface ToolContext {
+  /**
+   * 本次工具调用的 id。
+   * task 工具靠它把派生出的子 agent 挂到"是哪一次 task 调用"下面(落库与流式事件都用)。
+   */
+  callId: string
+}
+
 /** 一个可供模型调用的本地工具 */
 export interface ToolDefinition {
   /** 函数名,a-z A-Z 0-9 _ -,最长 64 */
@@ -14,7 +23,7 @@ export interface ToolDefinition {
    */
   volatile?: boolean
   /** 执行工具;返回给模型看的文本。抛错会被注册表捕获并转成错误说明 */
-  execute: (args: Record<string, unknown>) => Promise<string> | string
+  execute: (args: Record<string, unknown>, context: ToolContext) => Promise<string> | string
 }
 
 export interface ToolExecResult {
