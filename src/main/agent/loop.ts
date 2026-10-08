@@ -1,4 +1,9 @@
-import { streamChatCompletion, type ChatCompletionMessage } from '../chat/llm'
+import {
+  streamChatCompletion,
+  type ChatCompletionMessage,
+  type StreamChatParams,
+  type StreamChatResult
+} from '../chat/llm'
 import type { ChatStreamEvent, RunScope, ToolCallRecord } from '../chat/dto'
 import type { ToolExecResult, ToolRunner } from '../tools/registry'
 import { STEP_LIMIT_PROMPT } from './prompt'
@@ -101,6 +106,11 @@ export interface RunAgentParams {
   maxSteps: number
   store: AgentStore
   emit: (event: ChatStreamEvent) => void
+  /**
+   * 模型调用实现,默认走真实的流式接口。
+   * 与 AgentStore 同样的注入风格,让 ReAct 循环的每条分支能在无网络条件下被验证。
+   */
+  stream?: (params: StreamChatParams) => Promise<StreamChatResult>
 }
 
 /** run 的产出;子 agent 的 spawner 依此取回最终回答 */
@@ -125,6 +135,7 @@ export interface RunResult {
  */
 export async function runAgent(params: RunAgentParams): Promise<RunResult> {
   const { scope, signal, store, emit } = params
+  const stream = params.stream ?? streamChatCompletion
   const isRoot = scope.depth === 0
 
   // 复制一份,避免后续 push 污染调用方持有的数组
@@ -157,7 +168,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
       let reasoning = ''
       let calls: ToolCallRecord[] = []
       try {
-        const result = await streamChatCompletion({
+        const result = await stream({
           baseUrl: params.baseUrl,
           apiKey: params.apiKey,
           model: params.model,

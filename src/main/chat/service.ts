@@ -74,7 +74,7 @@ export function resortConversation(id: string): Database.RunResult {
 }
 
 /** 解析 tool_calls JSON 列;损坏时当作没有 */
-function parseToolCalls(raw: string): ToolCallRecord[] {
+export function parseToolCalls(raw: string): ToolCallRecord[] {
   try {
     const parsed: unknown = JSON.parse(raw)
     return Array.isArray(parsed) ? (parsed as ToolCallRecord[]) : []
@@ -84,7 +84,7 @@ function parseToolCalls(raw: string): ToolCallRecord[] {
 }
 
 /** 数据库行 → 对外消息(tool_calls 解析成数组) */
-function toMessage(row: MessageRow): Message {
+export function rowToMessage(row: MessageRow): Message {
   return { ...row, tool_calls: parseToolCalls(row.tool_calls) }
 }
 
@@ -93,7 +93,7 @@ export function listMessages(conversationId: string): Message[] {
   return getDb()
     .prepare<[string], MessageRow>(chatSql.messages.list)
     .all(conversationId)
-    .map(toMessage)
+    .map(rowToMessage)
 }
 
 /**
@@ -104,7 +104,7 @@ export function listTopLevelMessages(conversationId: string): Message[] {
   return getDb()
     .prepare<[string], MessageRow>(chatSql.messages.listTopLevel)
     .all(conversationId)
-    .map(toMessage)
+    .map(rowToMessage)
 }
 
 export function createMessage(

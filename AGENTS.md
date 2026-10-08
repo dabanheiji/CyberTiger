@@ -34,6 +34,7 @@ CyberTiger —— 基于 Electron 的桌面 AI 助手：多会话聊天 + ReAct 
 | `src/renderer/src/hooks/` | `useAgentStream`（订阅 `chat:stream`，维护含子 Agent 的步骤树）、`useSkills`、`useAgents`、`useSystemTheme` |
 | `src/renderer/src/components/` | `AgentSteps`（把一次回复的多步 ReAct 合并成「一个思考框 + 一条工具链 + 正文」，主气泡与子 Agent 面板共用、递归嵌套）、`ToolCallChain`、`ReasoningBox` |
 | `src/renderer/src/lib/` | `agentSteps.ts`（步骤树的纯函数：按 id 查找 / 不可变替换 / 中止态标记，`useAgentStream` 与聊天页共用） |
+| `test/` | vitest 用例（`test/main/**` 主进程、`test/renderer/**` 渲染层纯函数）、`test/stubs/`（electron / electron-store / better-sqlite3 的运行时替身）、`test/helpers/`（脚本化模型与假 `AgentStore`、临时目录与内存库工具、设置复位） |
 
 ## Development Commands
 
@@ -44,6 +45,9 @@ npm run build               # typecheck(node+web) + electron-vite build → out/
 npm run build:mac           # 打包 macOS（build:win / build:linux 同理）
 npm run typecheck           # tsc --noEmit 跑 tsconfig.node.json + tsconfig.web.json
 npm run lint                # ESLint 9 flat config
+npm test                    # vitest run（单进程 node 环境，用例在 test/）
+npm run test:watch          # vitest watch
+npm run test:coverage       # vitest + v8 覆盖率（范围见 vitest.config.ts）
 npm run format              # Prettier 全仓格式化
 npm run start               # electron-vite preview（跑构建产物）
 ```
@@ -75,6 +79,7 @@ npm run start               # electron-vite preview（跑构建产物）
 - `src/main/skills/parser.ts` / `src/main/agents/parser.ts` —— `SKILL.md` / `AGENT.md` 规范校验（`name` 必须 kebab-case 且等于目录名；agents 额外校验 `model` / `tools`）
 - `src/main/store/providers.ts` / `src/main/store/migrate.ts` —— 服务商解析与配置结构迁移
 - `src/main/database/sql.ts` —— 建表 DDL 与迁移定义
+- `src/main/database/migrate.ts` —— 迁移执行（`MigrationDb` 最小接口，测试用内存库跑同一套）
 - `src/preload/index.ts` + `src/preload/router/` —— `window.api` 暴露面
 - `src/renderer/src/pages/chat/{index,ChatPanel}.tsx` —— 聊天页主体
 - `electron.vite.config.ts` —— 三进程构建配置（唯一别名 `@renderer` → `src/renderer/src`）
@@ -93,11 +98,23 @@ npm run start               # electron-vite preview（跑构建产物）
 
 ## Testing & QA
 
-**本项目没有任何测试框架、测试文件、CI 配置或 git hook**（无 vitest/jest/playwright，无 `test` 脚本）。验证依赖以下本地门禁：
+vitest 5（`npm test`），配置 `vitest.config.ts`，用例在 `test/`（`test/main/**` 对应主进程、`test/renderer/**` 对应渲染层纯函数）。仍是单 node 环境，没有 jsdom / playwright，UI 组件不测。
 
-1. `npm run typecheck` —— 双 tsconfig 覆盖 main/preload 与 renderer（提交前必过）
-2. `npm run lint` —— 注意：**当前基线非零**（约 12 errors，集中在历史文件的 `no-explicit-any` / 显式返回类型）。改动不应新增 error。
-3. `npm run build` —— `typecheck` + 三进程构建的完整串联
-4. `npm run dev` 实测 —— 涉及 UI / 主进程行为的改动，启动应用实际走一遍相关路径（弹窗、输入、IPC、工具调用）
+- **运行时替身**：`resolve.alias`（必须用**数组 + 精确正则**，对象 alias 是前缀匹配，`electron` 会顺手吃掉 `electron-store`）把 `electron`、`electron-store`、`better-sqlite3` 换成 `test/stubs/*`。tsc 不读 alias，类型检查仍按真实依赖走，所以业务代码新用某个 Electron API 时要同步补 stub —— `test/main/boot.test.ts` 会以 import 失败的形态第一时间报出来。`better-sqlite3` 是原生模块，`postinstall` 后是 Electron ABI，Node 里 `require` 会因 NODE_MODULE_VERSION 不匹配直接炸，所以测试里换成"构造即抛错"的替身。
+- **数据库**：SQL 行为与迁移全部用 `node:sqlite` 的内存库验证（`test/helpers/sqlite.ts`）。为此 `database/index.ts` 里的迁移函数被抽成 `database/migrate.ts` 的 `MigrationDb` 接口（`exec` / `pragmaRead` / `pragmaWrite` / `select` / `transaction`），主进程用 better-sqlite3 适配，测试用内存库适配，跑的是同一套迁移脚本。
+- **文件系统接缝**：`CYBERTIGER_SKILLS_DIR` / `CYBERTIGER_AGENTS_DIR` 指到临时目录后调 `registry.scan()`；**不要调 `init()`**，它会 `fs.watch` 并留下监听句柄。
+- **设置单例**：`store` 是模块级单例，用例间会串味，每个用例前用 `test/helpers/settings.ts` 的 `resetSettings()` 复位。
+- **Agent 循环**：`runAgent` 的 `stream` 参数可注入脚本化模型（`test/helpers/agent.ts` 的 `makeModel(script)`），落库用 `makeStore()` 的 `AgentStore` 假实现，事件用 `makeEmit()` 收集；工具集用**真实** `createToolRunner` 组装，这样参数校验与未知工具拒绝也一并被覆盖。测试里绝不发真实网络请求。
+- **写法**：`describe` 对应一个概念组，`it` 的中文描述讲清"行为 + 为什么"。故意保留的问题用 `(已知缺陷)` 结尾命名并写明后果，不要写成通过的样子。
+
+已覆盖：Agent 循环（去重 / 锚定 / 步数上限 / 中止 / 落库）、history（skill 与角色目录、易变工具占位、`/` 展开退化）、`task` 工具、tools 注册表、skills 与 agents 的 parser / registry / installer、建表与迁移、`chatSql` 分层读取与 `tool_calls` JSON 往返、渲染层 `agentSteps` / `modelRef`。**未覆盖**：controller 与 preload 的 IPC 适配、`window-state`、MCP 连接生命周期与真实下载（`installer` 的远程分支）、所有 React 组件。
+
+验证门禁：
+
+1. `npm test` —— 提交前必过（`npm run test:coverage` 看范围数字）
+2. `npm run typecheck` —— 双 tsconfig 覆盖 main/preload 与 renderer
+3. `npm run lint` —— 注意：**当前基线非零**（约 12 errors，集中在历史文件的 `no-explicit-any` / 显式返回类型）。改动不应新增 error；`test/**` 与 `vitest.config.ts` 已豁免"显式返回类型"。
+4. `npm run build` —— `typecheck` + 三进程构建的完整串联
+5. `npm run dev` 实测 —— 涉及 UI / 主进程行为的改动，启动应用实际走一遍相关路径（弹窗、输入、IPC、工具调用）
 
 需要验证渲染层交互且无法人工观察时，可用 CDP 驱动真实窗口：以 `--remote-debugging-port=9222` 启动 Electron，通过 `/json` 拿页面 target 后用 WebSocket 执行 `Runtime.evaluate` / `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`。注意 `npx electron .`（加载项目 `package.json` → `app.name=cybertiger`）才对应用正确的 userData；直接 `npx electron out/main/index.js` 会让 `app.name` 变成 `Electron`，读到空的 store 与 skills 目录。相同 URL 的 `Page.navigate` 不会重载页面，验证前应重启实例以获得干净状态。

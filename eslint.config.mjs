@@ -28,5 +28,12 @@ export default defineConfig(
       ...eslintPluginReactRefresh.configs.vite.rules
     }
   },
+  {
+    // 测试与替身:用例回调不必写返回类型,替身的签名也无需贴合真实 API
+    files: ['test/**/*.ts', 'vitest.config.ts'],
+    rules: {
+      '@typescript-eslint/explicit-function-return-type': 'off'
+    }
+  },
   eslintConfigPrettier
 )
