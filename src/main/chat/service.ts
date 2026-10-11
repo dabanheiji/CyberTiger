@@ -20,6 +20,7 @@ import type {
   ToolCallRecord
 } from './dto'
 import { runAgent, MAIN_AGENT_MAX_STEPS, type AgentStore } from '../agent/loop'
+import { budgetFor } from '../agent/context'
 import { buildHistory, skillsCatalog } from '../agent/history'
 import {
   createTaskTool,
@@ -159,11 +160,19 @@ const agentStore: AgentStore = {
       .run(id, scope.conversationId, scope.runId, scope.agent, scope.parentCallId, scope.depth)
     return id
   },
-  updateStep: (messageId, content, reasoning, calls) => {
+  updateStep: (messageId, content, reasoning, calls, usage) => {
     if (quitting) return
     getDb()
       .prepare(chatSql.messages.updateStep)
-      .run(content, reasoning, JSON.stringify(calls), messageId)
+      .run(
+        content,
+        reasoning,
+        JSON.stringify(calls),
+        usage.prompt,
+        usage.completion,
+        usage.estimated ? 1 : 0,
+        messageId
+      )
   },
   removeStep: (messageId) => {
     if (quitting) return
@@ -285,7 +294,8 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
       runner,
       maxSteps: SUB_AGENT_MAX_STEPS,
       store: agentStore,
-      emit: ctx.emit
+      emit: ctx.emit,
+      budget: budgetFor(store.get('contextWindow'))
     })
 
     if (result.error && !result.finalContent) {
@@ -358,6 +368,7 @@ export function generateReply(
     history: buildHistory(messages, definitions),
     runner: createToolRunner(tools),
     maxSteps: MAIN_AGENT_MAX_STEPS,
+    budget: budgetFor(store.get('contextWindow')),
     store: agentStore,
     emit
   }).finally(() => {

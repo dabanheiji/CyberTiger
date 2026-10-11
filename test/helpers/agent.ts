@@ -2,7 +2,7 @@ import type { AgentStore } from '../../src/main/agent/loop'
 import type { ToolContext, ToolDefinition } from '../../src/main/tools/types'
 import { createToolRunner } from '../../src/main/tools/registry'
 import type { StreamChatParams, StreamChatResult } from '../../src/main/chat/llm'
-import type { ChatStreamEvent, RunScope, ToolCallRecord } from '../../src/main/chat/dto'
+import type { ChatStreamEvent, RunScope, ToolCallRecord, TokenUsage } from '../../src/main/chat/dto'
 
 /** 一次 run 的作用域;默认是主 Agent 的顶层 run */
 export function rootScope(overrides: Partial<RunScope> = {}): RunScope {
@@ -27,6 +27,8 @@ export interface StoredStep {
   content: string
   reasoning: string
   calls: ToolCallRecord[]
+  /** loop 写回的本步用量;落库实现靠它拼 SQL */
+  usage?: TokenUsage
 }
 
 export interface FakeStore extends AgentStore {
@@ -54,9 +56,9 @@ export function makeStore(): FakeStore {
       steps.set(id, { id, scope, content: '', reasoning: '', calls: [] })
       return id
     },
-    updateStep: (messageId, content, reasoning, calls) => {
+    updateStep: (messageId, content, reasoning, calls, usage) => {
       const step = steps.get(messageId)
-      if (step) Object.assign(step, { content, reasoning, calls })
+      if (step) Object.assign(step, { content, reasoning, calls, usage })
     },
     removeStep: (messageId) => {
       steps.delete(messageId)
@@ -119,6 +121,8 @@ export interface ModelStep {
   content?: string
   reasoning?: string
   toolCalls?: ToolCallRecord[]
+  /** 端点上报的 usage;不给就模拟"兼容端点不报用量"的情形 */
+  usage?: { prompt: number; completion: number }
 }
 
 export interface FakeModel {
@@ -143,7 +147,7 @@ export function makeModel(script: ModelStep[]): FakeModel {
         params.onDelta({ content: step.content.slice(0, mid), reasoning: '' })
         params.onDelta({ content: step.content.slice(mid), reasoning: '' })
       }
-      return { toolCalls: step.toolCalls ?? [] }
+      return { toolCalls: step.toolCalls ?? [], ...(step.usage ? { usage: step.usage } : {}) }
     }
   }
 }

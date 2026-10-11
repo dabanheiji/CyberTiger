@@ -7,7 +7,8 @@ CyberTiger —— 基于 Electron 的桌面 AI 助手：多会话聊天 + ReAct 
 三进程 Electron 应用，主进程严格分层：**renderer → preload router → `ipcMain.handle` → controller（IPC 适配）→ service（业务 + DB）→ 纯逻辑模块**。
 
 - **IPC 请求链**：渲染层只经 `window.api`（preload router）调用；`src/main/ipc/index.ts` 集中注册全部 handler，频道命名统一 `域:动作`（`chat:*` / `skills:*` / `agents:*` / `mcp:*` / `settings:*`）。
-- **一次 Agent run**：`chat:generateReply` 同步返回 `runId` → 后台 `runAgent`（`src/main/agent/loop.ts`，ReAct，`MAIN_AGENT_MAX_STEPS = 10`）循环「推理 → 工具调用 → 观察」→ 每步落库并经 `chat:stream` 事件流式回推渲染层 → `chat:abortReply` / 退出时 `abortAll()` 中止。同一 run 内**同名 + 同参数**的工具只真正执行一次（模型有时会为「更新」重复发起同一调用），命中缓存的那次 `tool_result.reused = true`，界面显示「已复用本轮结果」。第 2 步起每步会把当前请求重新贴到消息末尾做**目标锚定**，避免多步之后跑偏到历史里的别的话题。
+- **一次 Agent run**：`chat:generateReply` 同步返回 `runId` → 后台 `runAgent`（`src/main/agent/loop.ts`，ReAct，`MAIN_AGENT_MAX_STEPS = 10`）循环「推理 → 工具调用 → 观察」→ 每步落库并经 `chat:stream` 事件流式回推渲染层 → `chat:abortReply` / 退出时 `abortAll()` 中止。同一 run 内**同名 + 同参数**的工具只真正执行一次（模型有时会为「更新」重复发起同一调用），命中缓存的那次 `tool_result.reused = true`，界面显示「已复用本轮结果」。第 2 步起每步会把当前请求重新贴到消息末尾做**目标锚定**，避免多步之后跑偏到历史里的别的话题；锚定同时声明「已拿到的工具结果不需要重新获取」，因为它以 user 角色重复了请求，形似一条新提问，小模型会把这一步已经做过的事重做一遍。每步结束还会发一条 `usage` 事件（本步 token 用量 + 这次裁剪做了什么），与那步的 assistant 行一一对应。
+- **上下文预算与用量计量**：请求消息在发出前由 `agent/context.ts` 的 `planContext()` 压进预算（`budgetFor(contextWindow)` = 窗口 × 85% − 4k 输出预留）。裁剪按代价从小到大三级：整轮丢最旧的历史 → 缩写超长消息（只动 `content`，**绝不动 `tool_calls.arguments`**）→ 最近一轮内部弃掉较早的连续步骤。**「一轮」「一个单元」是分组单位**（一条 user 起一轮；一次 assistant 输出连同它发起的全部 tool 结果为一个单元），所以丢弃在结构上不可能造出孤儿 `tool_calls`——本项目踩过这个坑，别改成按条裁剪。`system`、本次请求原文、循环控制消息（收尾提示 / 目标锚定）永不参与丢弃，锚定始终排在最后（它靠「近期性」起作用，排到历史前面就失效）。真实用量优先取端点上报的 `chunk.usage`（`stream_options.include_usage`，不支持时自动降级不带它重试），拿不到才退回 `tokens/estimate.ts` 的估算并标 `estimated`；两个数都落进 `messages` 的 `prompt_tokens` / `completion_tokens` / `tokens_estimated`，界面显示「上下文 12.3k(估算) · 输出 480 · 已省略 N 轮历史」。
 - **子 Agent**：`runAgent` 是通用的，靠 `RunScope`（`chat/dto.ts`）区分主 / 子 run。主 Agent 额外持有 `task` 工具（`agent/task.ts`，由 `chat/service.ts` 现构造并注入 spawner），派生出**独立上下文**的子 run：自己的 system prompt、空白历史、裁剪过的工具集（`createToolRunner` 限定查找范围，并从父池剔除 `task` → 结构上不可能递归）、同一个 `AbortSignal`。子 Agent 的最终回答作为 `task` 的 tool_result 回传；其每一步都带 `parent_call_id` 落库与推流，前端在对应工具调用下内联展开。子 run 不发 `done` / `error`，失败由父级 tool_result(`ok=false`) 表达。角色名解析不到时**回退到通用角色**并 `console.warn`，不让整轮子任务失败（`task` 的 `agent` 参数在无可选角色时干脆不暴露，取值用 `enum` 钉死）；子 Agent 拿得到 `load_skill` 时才把 skill 目录拼进它的 system prompt，否则它会凭空猜技能名。
 - **工具注入**：`getAllTools()` = 内置工具 + 已连接 MCP 工具（实时合并）；每次 run 用 `createToolRunner(definitions)` 拍快照，`execute` 只在快照内查找（未授权工具名会被当作未知工具，不会直通全局）。Skills 走两条独立路径——① 渐进式加载：system prompt 里放启用 skill 的 name/description 目录，模型按需调 `load_skill`；② `/` 手动触发：skill 名写入 `messages.skill`，`buildHistory` 展开成 `[Skill: xxx]` + 正文。子 Agent 角色目录（`agents/*/AGENT.md`）同样以 name/description 注入，模型通过 `task` 的 `agent` 参数选用。
 - **模型服务商**：模型配置按服务商组织（`AppSettings.providers`：各自一套 `baseUrl` / `apiKey` / 模型候选清单），当前选择是结构化的 `ModelRef{providerId, model}`。一次 run 由调用方显式传入 `providerId`，主进程经 `resolveConnection` 解析成连接信息——不读全局当前选择，换服务商不会影响正在跑的那轮。单服务商时代的 `baseUrl` / `apiKey` / `models` 由 `store/migrate.ts` 在启动时一次性搬进 `providers[0]` 并删除旧键。
@@ -18,8 +19,9 @@ CyberTiger —— 基于 Electron 的桌面 AI 助手：多会话聊天 + ReAct 
 
 | 路径 | 用途 |
 |---|---|
-| `src/main/chat/` | 聊天核心：`service.ts`（会话/消息 + run 管理）、`controller.ts`（IPC 适配）、`llm.ts`（流式调用 + 多供应商 reasoning 归一）、`dto.ts`（**跨进程契约源**）、`sql.ts`（全部 SQL 常量 + 行类型） |
-| `src/main/agent/` | `loop.ts`（通用 ReAct 循环 + `RunScope` + `AgentStore` 接口）、`task.ts`（`task` 工具与 `SubAgentSpawner`）、`history.ts`（请求消息组装 / skill 与角色目录 / volatile 结果替换）、`prompt.ts`（主 / 子 Agent 的中文 system prompt） |
+| `src/main/chat/` | 聊天核心：`service.ts`（会话/消息 + run 管理）、`controller.ts`（IPC 适配）、`llm.ts`（流式调用 + 多供应商 reasoning / usage 归一 + 不支持参数时的降级重试）、`dto.ts`（**跨进程契约源**）、`sql.ts`（全部 SQL 常量 + 行类型） |
+| `src/main/agent/` | `loop.ts`（通用 ReAct 循环 + `RunScope` + `AgentStore` 接口）、`context.ts`（上下文预算与三级裁剪）、`task.ts`（`task` 工具与 `SubAgentSpawner`）、`history.ts`（请求消息组装 / skill 与角色目录 / volatile 结果替换）、`prompt.ts`（主 / 子 Agent 的中文 system prompt） |
+| `src/main/tokens/` | `estimate.ts`（token 估算与 `formatTokens`；**主进程与渲染层共用**的纯函数） |
 | `src/main/tools/` | `registry.ts`（注册 / 查找 / 执行）、`types.ts`（`ToolDefinition`）、`time.ts`（内置工具示例） |
 | `src/main/skills/` | `registry.ts`（目录扫描 / 读取）、`parser.ts`（frontmatter 校验）、`installer.ts`（GitHub/URL/本地安装）、`tools.ts`（`load_skill` / `read_skill_file`）、`controller.ts`（IPC） |
 | `src/main/agents/` | `builtin.ts`（内置通用角色）、`parser.ts`（`AGENT.md` 校验与序列化）、`registry.ts`（扫描 / 启停 / 增删改，目录为唯一事实来源）、`controller.ts`（IPC） |
@@ -33,7 +35,7 @@ CyberTiger —— 基于 Electron 的桌面 AI 助手：多会话聊天 + ReAct 
 | `src/renderer/src/pages/` | `chat/`（`index.tsx` 状态中枢、`ChatPanel.tsx` 输入与气泡、`Sidebar.tsx`）、`settings/`（`index.tsx` 把四个配置域拆成 tabs：模型服务 / MCP / Skills / 子 Agent，默认停在模型服务；模型服务是 `ProvidersPanel.tsx` + `ProviderFormDrawer.tsx` 的服务商增删改，子 Agent 是 `AgentsPanel.tsx` + `AgentFormDrawer.tsx`） |
 | `src/renderer/src/hooks/` | `useAgentStream`（订阅 `chat:stream`，维护含子 Agent 的步骤树）、`useSkills`、`useAgents`、`useSystemTheme` |
 | `src/renderer/src/components/` | `AgentSteps`（把一次回复的多步 ReAct 合并成「一个思考框 + 一条工具链 + 正文」，主气泡与子 Agent 面板共用、递归嵌套）、`ToolCallChain`、`ReasoningBox` |
-| `src/renderer/src/lib/` | `agentSteps.ts`（步骤树的纯函数：按 id 查找 / 不可变替换 / 中止态标记，`useAgentStream` 与聊天页共用） |
+| `src/renderer/src/lib/` | `agentSteps.ts`（步骤树的纯函数：按 id 查找 / 不可变替换 / 中止态标记 / `toStepUsage` 与 `summarizeUsage` 把各步用量汇总成一行，`useAgentStream` 与聊天页共用） |
 | `test/` | vitest 用例（`test/main/**` 主进程、`test/renderer/**` 渲染层纯函数）、`test/stubs/`（electron / electron-store / better-sqlite3 的运行时替身）、`test/helpers/`（脚本化模型与假 `AgentStore`、临时目录与内存库工具、设置复位） |
 
 ## Development Commands
@@ -62,12 +64,13 @@ npm run start               # electron-vite preview（跑构建产物）
 - **IPC 契约**：handler 返回 `IpcResult<T> = { success: true; data: T } | { success: false; msg: string }`，用统一包装器捕获异常（`chat/controller.ts` 的 `run()`、`skills/controller.ts` 的 `run()` / `runAsync()`）。**例外**：`settings:*` 直接返回原始值，无 `IpcResult`。
 - **SQL 集中**：所有语句写在对应 `sql.ts` 里导出为常量（如 `chatSql.messages.list`），不在业务代码内联拼接。SCHEMA 变更必须走 `src/main/database/sql.ts` 的 `columnMigrations`（加列）或 `tableRebuilds`（改约束）——`CREATE TABLE IF NOT EXISTS` 对已有库不生效。
 - **依赖注入**：纯逻辑模块不直接依赖 DB。`agent/loop.ts` 通过 `AgentStore` 接口接收落库操作，实现由 `chat/service.ts` 注入。
-- **流式事件**：主进程 → 渲染层的事件统一用判别联合类型 `ChatStreamEvent`（`step_start` / `delta` / `tool_call` / `tool_result` / `done` / `error`），定义在 `chat/dto.ts`；渲染层按 `type` 分支消费。事件都带 `RunScope`（含 `parentCallId` / `depth`），子 Agent 的步骤据此挂到父级工具调用下；`tool_result.reused` 标记本次命中了本轮内去重缓存。
+- **流式事件**：主进程 → 渲染层的事件统一用判别联合类型 `ChatStreamEvent`（`step_start` / `delta` / `tool_call` / `tool_result` / `usage` / `done` / `error`），定义在 `chat/dto.ts`；渲染层按 `type` 分支消费。事件都带 `RunScope`（含 `parentCallId` / `depth`），子 Agent 的步骤据此挂到父级工具调用下；`tool_result.reused` 标记本次命中了本轮内去重缓存；`usage` 带本步的 `TokenUsage`（`estimated` 区分端点上报还是本地估算）与 `ContextMeter`（这次裁剪丢了什么）。
 - **错误处理**：工具执行 `executeTool` **永不抛错**，失败返回 `{ ok: false, result: 说明 }` 交给模型自纠；LLM 错误经 `toReadableMessage` 归一为面向用户的中文提示；skill 已被删/禁用时退化为普通消息，不中断对话。
+- **给模型看的文案只用陈述句，绝不写「请重新调用 / 每次都必须调用」这类祈使**：模型会把祈使当成本轮待办去执行。这个项目踩过两次——① `agent/history.ts` 的 `STALE_RESULT_PLACEHOLDER` 旧文案「如需该信息请重新调用工具」，模型读完转头重查时间并回答了时间；② `tools/time.ts` 描述结尾「每次被问到时间都必须重新调用」，让一句问话变成三步重复调用（工具描述每步都随请求整份下发，比 system prompt 更靠近、更具体，两者冲突时它赢，而 `prompt.ts` 第 3 条写的恰好是「不要重复调用」）。**跨轮重取靠 `volatile` 标记 + 历史占位符在结构上保证，不靠文案催促。**
 - **异步模式**：串行化写操作（如 `skills/installer.ts` 的 `serialized` 队列）、防抖重扫（`skills/registry.ts` `scheduleRescan` 300ms）、资源清理用 `finally`。
 - **前端状态**：无全局状态库。页面级 `useState` + `useRef`（ref 用于异步回调读取最新值，避免闭包过期）；跨组件复用逻辑放 `hooks/`；组件库统一用 antd 6 / `@ant-design/x`。
 - **前端样式覆盖**：antd v6 样式包在 `:where(...)` 中（优先级 0），普通类选择器即可覆盖，**无需 `!important`**；需要选中间层 DOM 时用组件库的 `classNames.*` 语义槽（如 `Suggestion` 的 `classNames.popup` → 弹层根），再在 `assets/main.css` 写后代选择器。先例见 `.cybertiger-skill-dropdown`。
-- **跨进程共享类型**：渲染层直接 import 主进程的纯类型文件，但**必须同步登记进 `tsconfig.web.json` 的 `include`**（目前 7 个文件：`chat/sql.ts`、`chat/dto.ts`、`mcp/types.ts`、`skills/types.ts`、`agents/types.ts`、`store/types.ts`、`store/modelRef.ts`）。新增共享类型文件若漏登记，web 侧类型检查会失败。
+- **跨进程共享类型**：渲染层直接 import 主进程的纯类型文件，但**必须同步登记进 `tsconfig.web.json` 的 `include`**（目前 8 个文件：`chat/sql.ts`、`chat/dto.ts`、`mcp/types.ts`、`skills/types.ts`、`agents/types.ts`、`store/types.ts`、`store/modelRef.ts`、`tokens/estimate.ts`）。新增共享类型文件若漏登记，web 侧类型检查会失败。
 
 ## Important Files
 
@@ -75,6 +78,7 @@ npm run start               # electron-vite preview（跑构建产物）
 - `src/main/ipc/index.ts` —— 全部 IPC handler 注册
 - `src/main/chat/dto.ts` —— 跨进程数据契约（DTO / 事件 / `IpcResult`）
 - `src/main/agent/loop.ts` / `src/main/agent/task.ts` —— 通用 Agent 主循环、`AgentStore` 接口与 `task` 派生工具
+- `src/main/agent/context.ts` / `src/main/tokens/estimate.ts` —— 上下文预算与裁剪（`planContext` / `budgetFor`）、token 估算与界面显示格式
 - `src/main/tools/registry.ts` —— 工具注册与执行入口（新增内置工具在此挂载）
 - `src/main/skills/parser.ts` / `src/main/agents/parser.ts` —— `SKILL.md` / `AGENT.md` 规范校验（`name` 必须 kebab-case 且等于目录名；agents 额外校验 `model` / `tools`）
 - `src/main/store/providers.ts` / `src/main/store/migrate.ts` —— 服务商解析与配置结构迁移
@@ -104,10 +108,11 @@ vitest 5（`npm test`），配置 `vitest.config.ts`，用例在 `test/`（`test
 - **数据库**：SQL 行为与迁移全部用 `node:sqlite` 的内存库验证（`test/helpers/sqlite.ts`）。为此 `database/index.ts` 里的迁移函数被抽成 `database/migrate.ts` 的 `MigrationDb` 接口（`exec` / `pragmaRead` / `pragmaWrite` / `select` / `transaction`），主进程用 better-sqlite3 适配，测试用内存库适配，跑的是同一套迁移脚本。
 - **文件系统接缝**：`CYBERTIGER_SKILLS_DIR` / `CYBERTIGER_AGENTS_DIR` 指到临时目录后调 `registry.scan()`；**不要调 `init()`**，它会 `fs.watch` 并留下监听句柄。
 - **设置单例**：`store` 是模块级单例，用例间会串味，每个用例前用 `test/helpers/settings.ts` 的 `resetSettings()` 复位。
-- **Agent 循环**：`runAgent` 的 `stream` 参数可注入脚本化模型（`test/helpers/agent.ts` 的 `makeModel(script)`），落库用 `makeStore()` 的 `AgentStore` 假实现，事件用 `makeEmit()` 收集；工具集用**真实** `createToolRunner` 组装，这样参数校验与未知工具拒绝也一并被覆盖。测试里绝不发真实网络请求。
+- **Agent 循环**：`runAgent` 的 `stream` 参数可注入脚本化模型（`test/helpers/agent.ts` 的 `makeModel(script)`，`usage` 字段用来模拟「端点报了真实用量」与「不报」两种情形），落库用 `makeStore()` 的 `AgentStore` 假实现，事件用 `makeEmit()` 收集；工具集用**真实** `createToolRunner` 组装，这样参数校验与未知工具拒绝也一并被覆盖。传 `budget` 就能用小预算触发裁剪，并断言每条被压缩过的请求都没有孤儿 `tool_calls`。测试里绝不发真实网络请求。
+- **模型层**：`streamChatCompletion` 里 `new OpenAI(...)` 不可注入，用 `vi.mock('openai')` 换掉客户端的 `chat.completions.create` —— **错误类必须仍取真实模块的那些**（`Object.create(OpenAI.BadRequestError.prototype)` 造实例），因为降级分支靠 `instanceof` 判断；真实 chunk 用 async generator 回放。见 `test/main/chat/llm-stream.test.ts`。
 - **写法**：`describe` 对应一个概念组，`it` 的中文描述讲清"行为 + 为什么"。故意保留的问题用 `(已知缺陷)` 结尾命名并写明后果，不要写成通过的样子。
 
-已覆盖：Agent 循环（去重 / 锚定 / 步数上限 / 中止 / 落库）、history（skill 与角色目录、易变工具占位、`/` 展开退化）、`task` 工具、tools 注册表、skills 与 agents 的 parser / registry / installer、建表与迁移、`chatSql` 分层读取与 `tool_calls` JSON 往返、渲染层 `agentSteps` / `modelRef`。**未覆盖**：controller 与 preload 的 IPC 适配、`window-state`、MCP 连接生命周期与真实下载（`installer` 的远程分支）、所有 React 组件。
+已覆盖：Agent 循环（去重 / 锚定 / 步数上限 / 中止 / 落库 / 用量与裁剪）、`planContext` 三级裁剪（整轮丢弃 / 单元同进同出 / 缩写只动 content / 压不住也照发）、history（skill 与角色目录、易变工具占位、`/` 展开退化）、`task` 工具、tools 注册表、时间工具（含「描述文案不得出现诱导重复调用的祈使句」这条回归守卫）、skills 与 agents 的 parser / registry / installer、建表与迁移、`chatSql` 分层读取与 `tool_calls` JSON 往返、`normalizeDelta` / `normalizeUsage` 与降级重试链、token 估算器、渲染层 `agentSteps` / `modelRef`。**未覆盖**：controller 与 preload 的 IPC 适配、`window-state`、MCP 连接生命周期与真实下载（`installer` 的远程分支）、所有 React 组件。
 
 验证门禁：
 
@@ -117,4 +122,5 @@ vitest 5（`npm test`），配置 `vitest.config.ts`，用例在 `test/`（`test
 4. `npm run build` —— `typecheck` + 三进程构建的完整串联
 5. `npm run dev` 实测 —— 涉及 UI / 主进程行为的改动，启动应用实际走一遍相关路径（弹窗、输入、IPC、工具调用）
 
-需要验证渲染层交互且无法人工观察时，可用 CDP 驱动真实窗口：以 `--remote-debugging-port=9222` 启动 Electron，通过 `/json` 拿页面 target 后用 WebSocket 执行 `Runtime.evaluate` / `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`。注意 `npx electron .`（加载项目 `package.json` → `app.name=cybertiger`）才对应用正确的 userData；直接 `npx electron out/main/index.js` 会让 `app.name` 变成 `Electron`，读到空的 store 与 skills 目录。相同 URL 的 `Page.navigate` 不会重载页面，验证前应重启实例以获得干净状态。
+需要验证渲染层交互且无法人工观察时，可用 CDP 驱动真实窗口：以 `--remote-debugging-port=9222` 启动 Electron，通过 `/json` 拿页面 target 后用 WebSocket 执行 `Runtime.evaluate` / `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`。注意 `npx electron .`（加载项目 `package.json` → `app.name=cybertiger`）才对应用正确的 userData；直接 `npx electron out/main/index.js` 会让 `app.name` 变成 `Electron`，读到空的 store 与 skills 目录。相同 URL 的 `Page.navigate` 不会重载页面，验证前应重启实例以获得干净状态。**脚本化改 antd 受控输入**（如 `InputNumber`）要用 `input.focus()` → `input.select()` → `document.execCommand('insertText', false, value)` → `input.blur()`：直接赋值 + `dispatchEvent(new Event('input'))` 不会被 React 的 value tracker 认账，`onChange` 不触发，界面看着改了、store 里其实没写。写完后用 `window.api.settings.getAll()` 回读确认，并在同一个脚本的 `finally` 里 `settings.remove(key)` 复原。
+

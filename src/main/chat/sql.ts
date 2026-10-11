@@ -27,6 +27,12 @@ export interface MessageRow {
   parent_call_id: string
   /** 嵌套深度:0 = 主 agent,1 = 子 agent */
   depth: number
+  /** 本步的输入 token;仅 assistant 行有意义,其余为 0 */
+  prompt_tokens: number
+  /** 本步的输出 token */
+  completion_tokens: number
+  /** 1 = 端点没报 usage,上面两个数是本地估算值 */
+  tokens_estimated: number
   created_at: string
 }
 
@@ -57,8 +63,9 @@ export const chatSql = {
     /** Agent 的一步:空 assistant 行占位 */
     addAssistantStep:
       "INSERT INTO messages (id, conversation_id, role, content, run_id, agent, parent_call_id, depth) VALUES (?, ?, 'assistant', '', ?, ?, ?, ?)",
-    /** 一步结束后写回正文、思考和工具调用 */
-    updateStep: 'UPDATE messages SET content = ?, reasoning = ?, tool_calls = ? WHERE id = ?',
+    /** 一步结束后写回正文、思考、工具调用与本步用量 */
+    updateStep:
+      'UPDATE messages SET content = ?, reasoning = ?, tool_calls = ?, prompt_tokens = ?, completion_tokens = ?, tokens_estimated = ? WHERE id = ?',
     /** 工具执行结果 */
     addToolMessage:
       "INSERT INTO messages (id, conversation_id, role, content, tool_call_id, run_id, agent, parent_call_id, depth) VALUES (?, ?, 'tool', ?, ?, ?, ?, ?, ?)",

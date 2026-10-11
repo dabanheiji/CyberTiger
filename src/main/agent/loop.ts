@@ -1,11 +1,14 @@
 import {
   streamChatCompletion,
   type ChatCompletionMessage,
+  type ReportedUsage,
   type StreamChatParams,
   type StreamChatResult
 } from '../chat/llm'
-import type { ChatStreamEvent, RunScope, ToolCallRecord } from '../chat/dto'
+import type { ChatStreamEvent, RunScope, ToolCallRecord, TokenUsage } from '../chat/dto'
 import type { ToolExecResult, ToolRunner } from '../tools/registry'
+import { estimateRequestTokens, estimateTextTokens } from '../tokens/estimate'
+import { budgetFor, planContext, type ContextBudget } from './context'
 import { STEP_LIMIT_PROMPT } from './prompt'
 
 /** 主 agent 一个 run 内最多调用模型的次数(每次可能带多个工具调用) */
@@ -61,6 +64,10 @@ function latestRequest(history: ChatCompletionMessage[]): string {
  * 小模型跑到第三四步就开始丢目标 —— 实测中用户问"中牟到汝阳的路线",模型在第 4 步
  * 转头去重新查询时间并最终答了时间。放进 system prompt(位置 0)没用,真正起作用的是
  * "近期性",所以必须追加在最后。
+ *
+ * 最后一句不能省:锚定形似一条新提问,实测中模型读到重复的请求后把"要答时间"当成
+ * 还没做的事,连着三步换着时区名重调 get_current_time。它只说"已拿到的不必再取",
+ * 不写"请重新调用"这类祈使 —— 那正是把模型推回去重复调用的写法。
  */
 function goalAnchor(request: string): ChatCompletionMessage {
   const clipped =
@@ -69,7 +76,8 @@ function goalAnchor(request: string): ChatCompletionMessage {
     role: ANCHOR_ROLE,
     content:
       `[系统提醒] 本轮只需回应用户最近这一条消息:「${clipped}」。\n` +
-      '前面的历史消息只是背景,不要转去回答其中出现过的其他话题。'
+      '前面的历史消息只是背景,不要转去回答其中出现过的其他话题。\n' +
+      '上面已经执行过的工具及其结果就是本轮拿到的信息,已拿到的不需要重新获取。'
   }
 }
 
@@ -82,7 +90,9 @@ export interface AgentStore {
     messageId: string,
     content: string,
     reasoning: string,
-    calls: ToolCallRecord[]
+    calls: ToolCallRecord[],
+    /** 本步的 token 用量,用于界面显示与后续预算校准 */
+    usage: TokenUsage
   ) => void
   removeStep: (messageId: string) => void
   /** 插入 tool 行,返回 id */
@@ -106,6 +116,12 @@ export interface RunAgentParams {
   maxSteps: number
   store: AgentStore
   emit: (event: ChatStreamEvent) => void
+  /**
+   * 上下文预算;缺省按 32k 兜底窗口算。
+   * 每步请求都照它裁剪 —— 长工具链的 run 会把自己的工具结果一路堆到几万 token,
+   * 只裁历史不裁 run 内等于没裁。
+   */
+  budget?: ContextBudget
   /**
    * 模型调用实现,默认走真实的流式接口。
    * 与 AgentStore 同样的注入风格,让 ReAct 循环的每条分支能在无网络条件下被验证。
@@ -137,15 +153,19 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
   const { scope, signal, store, emit } = params
   const stream = params.stream ?? streamChatCompletion
   const isRoot = scope.depth === 0
+  const budget = params.budget ?? budgetFor()
 
   // 复制一份,避免后续 push 污染调用方持有的数组
-  const history = [...params.history]
+  const source = [...params.history]
+  // 首位的 system 固定保留,其余消息才进裁剪
+  const system = source[0]?.role === 'system' ? source[0] : undefined
+  const context = system ? source.slice(1) : source
   const tools = params.runner.toChatCompletionTools()
   // 同一 run 内"同名 + 同参数"的工具只真正执行一次。模型有时会为了"更新"重复发起
   // 一模一样的调用(实测:一轮里对 get_current_time 连调两次),这里直接复用上次结果。
   const toolCache = new Map<string, ToolExecResult>()
   // 本次 run 要回答的那条请求(主 agent 是用户的最新消息,子 agent 是任务说明)
-  const request = latestRequest(history)
+  const request = latestRequest(context)
   // 终止步的正文才是答案:停在工具步时 content 为空,继续往后找
   let finalContent = ''
 
@@ -154,12 +174,15 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
       if (signal.aborted) break
       // 超过上限的最后一次调用不给工具,强制模型收尾
       const finalStep = step > params.maxSteps
+      const stepTools = finalStep ? [] : tools
 
-      // 每步现拼请求消息,不往 history 里累积这些"循环控制"内容
-      const messages = [...history]
-      if (finalStep) messages.push({ role: 'user', content: STEP_LIMIT_PROMPT })
+      // 每步现拼请求消息,不往 context 里累积这些"循环控制"内容
+      const pinned: ChatCompletionMessage[] = []
+      if (finalStep) pinned.push({ role: 'user', content: STEP_LIMIT_PROMPT })
       // 第 1 步的请求本来就紧跟在 system prompt 后面,无需锚定
-      if (step > 1 && request) messages.push(goalAnchor(request))
+      if (step > 1 && request) pinned.push(goalAnchor(request))
+      const plan = planContext({ system, history: context, pinned, tools: stepTools, budget })
+      const estimatedPrompt = estimateRequestTokens(plan.messages, stepTools)
 
       const messageId = store.addStep(scope)
       emit({ type: 'step_start', scope, messageId })
@@ -167,12 +190,13 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
       let content = ''
       let reasoning = ''
       let calls: ToolCallRecord[] = []
+      let reported: ReportedUsage | undefined
       try {
         const result = await stream({
           baseUrl: params.baseUrl,
           apiKey: params.apiKey,
           model: params.model,
-          messages,
+          messages: plan.messages,
           tools: finalStep ? undefined : tools,
           signal,
           onDelta: (delta) => {
@@ -188,9 +212,19 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
           }
         })
         calls = signal.aborted ? [] : result.toolCalls
+        reported = result.usage
       } finally {
         // 无论成功、失败还是中止,已收到的内容都要保留
-        persistStep(store, messageId, content, reasoning, calls)
+        const usage = toUsage(
+          reported,
+          estimatedPrompt,
+          estimateTextTokens(content) + estimateTextTokens(reasoning)
+        )
+        persistStep(store, messageId, content, reasoning, calls, usage)
+        // 空步(整行被删掉)没有用量可报
+        if (content || reasoning || calls.length > 0 || reported) {
+          emit({ type: 'usage', scope, messageId, usage, context: plan.meter })
+        }
       }
 
       if (content) finalContent = content
@@ -198,8 +232,8 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
       // 收尾步不再执行工具,即便模型仍返回了调用
       if (signal.aborted || calls.length === 0 || finalStep) break
 
-      // 把本步的 assistant 消息追加进历史,再逐个执行工具并追加观察结果
-      history.push({
+      // 把本步的 assistant 消息追加进上下文,再逐个执行工具并追加观察结果
+      context.push({
         role: 'assistant',
         content: content || null,
         tool_calls: calls.map((c) => ({
@@ -227,7 +261,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
           ok: exec.ok,
           reused: cached !== undefined
         })
-        history.push({ role: 'tool', tool_call_id: call.id, content: exec.result })
+        context.push({ role: 'tool', tool_call_id: call.id, content: exec.result })
       }
     }
 
@@ -254,11 +288,12 @@ function persistStep(
   messageId: string,
   content: string,
   reasoning: string,
-  calls: ToolCallRecord[]
+  calls: ToolCallRecord[],
+  usage: TokenUsage
 ): void {
   try {
     if (content || reasoning || calls.length > 0) {
-      store.updateStep(messageId, content, reasoning, calls)
+      store.updateStep(messageId, content, reasoning, calls, usage)
     } else {
       store.removeStep(messageId)
     }
@@ -266,4 +301,17 @@ function persistStep(
     // 会话已被删除(级联删掉了占位行)等情况下写库失败不影响主流程
     console.error('[agent] persist step failed:', error)
   }
+}
+
+/**
+ * 端点报了 usage 就以它为准,没报才退回估算并标注 estimated。
+ * 界面据此决定显示「12.3k」还是「≈12.3k」—— 混在一起看会误导人对预算的信任度。
+ */
+function toUsage(
+  reported: ReportedUsage | undefined,
+  estimatedPrompt: number,
+  estimatedCompletion: number
+): TokenUsage {
+  if (reported) return { ...reported, estimated: false }
+  return { prompt: estimatedPrompt, completion: estimatedCompletion, estimated: true }
 }

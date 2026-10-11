@@ -65,7 +65,10 @@ describe('补列迁移', () => {
       'skill',
       'agent',
       'parent_call_id',
-      'depth'
+      'depth',
+      'prompt_tokens',
+      'completion_tokens',
+      'tokens_estimated'
     ])
   })
 

@@ -97,6 +97,16 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
             }))
           })
           return
+        case 'usage':
+          update({
+            ...current,
+            steps: mapStep(current.steps, event.messageId, (step) => ({
+              ...step,
+              usage: event.usage,
+              context: event.context
+            }))
+          })
+          return
         case 'done':
           await optionsRef.current.onDone(event.scope.conversationId, event.aborted)
           break

@@ -13,7 +13,7 @@ import type { Message } from '../../../../main/chat/sql'
 import type { ModelProvider, ModelRef } from '../../../../main/store/types'
 import { modelKey, parseModelKey } from '../../lib/modelRef'
 import type { AgentStep, StreamingRun, StreamingToolCall } from '../../hooks/useAgentStream'
-import { attachToolResult, finalizeStep, findCall } from '../../lib/agentSteps'
+import { attachToolResult, finalizeStep, findCall, toStepUsage } from '../../lib/agentSteps'
 import { useSkills } from '../../hooks/useSkills'
 import AgentSteps from '../../components/AgentSteps'
 
@@ -93,6 +93,8 @@ function toAgentStep(m: Message): AgentStep {
     messageId: m.id,
     content: m.content,
     reasoning: m.reasoning,
+    // 用量随每一行入库,历史回放才能显示和历史一致,而不是只有实时流有
+    usage: toStepUsage(m),
     toolCalls: m.tool_calls.map((c) => ({ ...c, status: 'running' as const }))
   }
 }

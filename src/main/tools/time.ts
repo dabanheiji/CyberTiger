@@ -13,7 +13,8 @@ function isValidTimeZone(tz: string): boolean {
 export const getCurrentTimeTool: ToolDefinition = {
   name: 'get_current_time',
   description:
-    '获取当前的日期和时间。当用户询问现在几点、今天几号、星期几,或需要基于当前时间计算时调用。可指定 IANA 时区名(如 Asia/Shanghai、America/New_York),不指定则使用用户所在系统的时区。结果只代表调用那一刻,每次被问到时间都必须重新调用。',
+    '获取当前的日期和时间。当用户询问现在几点、今天几号、星期几,或需要基于当前时间计算时调用。可指定 IANA 时区名(如 Asia/Shanghai、America/New_York),不指定则使用用户所在系统的时区。' +
+    '结果只代表调用那一刻;中国境内统一使用北京时间,时区名不同不代表时间不同。',
   volatile: true,
   parameters: {
     type: 'object',

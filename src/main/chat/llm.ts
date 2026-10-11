@@ -25,6 +25,39 @@ export interface StreamChatParams {
 export interface StreamChatResult {
   /** 模型本轮发起的工具调用,参数已拼装完整;空数组表示没有 */
   toolCalls: ToolCallRecord[]
+  /**
+   * 端点上报的真实用量。
+   * 部分兼容实现不支持 stream_options.include_usage,拿不到时没有该字段,
+   * 调用方只能退回 tokens/estimate 的估算值。
+   */
+  usage?: ReportedUsage
+}
+
+/**
+ * 端点报回来的 token 计数。
+ * 只描述"报了什么",是否可信由调用方用 dto.TokenUsage.estimated 标注。
+ */
+export interface ReportedUsage {
+  prompt: number
+  completion: number
+}
+
+/** 兼容端点的 usage 结构各家略有出入,缺失项按 0 计 */
+interface RawUsage {
+  prompt_tokens?: number | null
+  completion_tokens?: number | null
+}
+
+/**
+ * 把响应里的 usage 归一为计数;没有该字段或字段全空时返回 null。
+ * 带 include_usage 的响应里最后一个 chunk 只有 usage、没有 choices,
+ * 所以这里必须能在"空 chunk"上独立工作。
+ */
+export function normalizeUsage(raw: unknown): ReportedUsage | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const { prompt_tokens: prompt, completion_tokens: completion } = raw as RawUsage
+  if (prompt == null && completion == null) return null
+  return { prompt: prompt ?? 0, completion: completion ?? 0 }
 }
 
 /**
@@ -81,7 +114,9 @@ class ToolCallAccumulator {
 /**
  * 以 OpenAI 兼容协议流式调用 /chat/completions。
  * 被 signal 中止时正常 resolve,由调用方根据 signal.aborted 判断;其他错误抛出带可读提示的 Error。
- * 服务端不支持 tools(400 且报错含 tool)时会自动去掉 tools 重试一次。
+ * 服务端不支持 tools(400 且报错含 tool)时会自动去掉 tools 重试一次;
+ * 不支持 stream_options 时同样降级重试 —— 老兼容层会因为这个可选参数直接 400,
+ * 不能让它拖垮整次调用,代价只是失去真实用量。
  */
 export async function streamChatCompletion(params: StreamChatParams): Promise<StreamChatResult> {
   const { baseUrl, apiKey, model, messages, tools, signal, onDelta } = params
@@ -93,35 +128,50 @@ export async function streamChatCompletion(params: StreamChatParams): Promise<St
     maxRetries: 1
   })
 
-  const run = async (withTools: boolean): Promise<StreamChatResult> => {
+  const run = async (withTools: boolean, withUsage: boolean): Promise<StreamChatResult> => {
     const acc = new ToolCallAccumulator()
+    let usage: ReportedUsage | undefined
     const stream = await client.chat.completions.create(
       {
         model,
         messages,
         stream: true,
-        ...(withTools && tools && tools.length > 0 ? { tools } : {})
+        ...(withTools && tools && tools.length > 0 ? { tools } : {}),
+        // 用量在最后一个 chunk 的 usage 里,那一块没有 choices
+        ...(withUsage ? { stream_options: { include_usage: true } } : {})
       },
       { signal }
     )
     for await (const chunk of stream) {
-      const raw = chunk.choices[0]?.delta as RawDelta | undefined
+      const reported = normalizeUsage(chunk.usage)
+      if (reported) usage = reported
+      // 带 usage 的那一块可能整个不带 choices,不能直接下标取
+      const raw = chunk.choices?.[0]?.delta as RawDelta | undefined
       if (!raw) continue
       acc.push(raw.tool_calls)
       const delta = normalizeDelta(raw)
       if (delta.content || delta.reasoning) onDelta(delta)
     }
-    return { toolCalls: acc.finish() }
+    return { toolCalls: acc.finish(), ...(usage ? { usage } : {}) }
   }
 
+  const hasTools = !!tools && tools.length > 0
   try {
     try {
-      return await run(true)
+      return await run(true, true)
     } catch (error) {
-      if (!signal.aborted && isToolsUnsupported(error) && tools && tools.length > 0) {
-        return await run(false)
+      if (signal.aborted) throw error
+      // 不认 stream_options:去掉它再试,tools 维持原样
+      if (isRejectedParam(error, usageRejected)) {
+        try {
+          return await run(hasTools, false)
+        } catch (retry) {
+          if (signal.aborted || !isRejectedParam(retry, toolsRejected) || !hasTools) throw retry
+          return await run(false, false)
+        }
       }
-      throw error
+      if (!isRejectedParam(error, toolsRejected) || !hasTools) throw error
+      return await run(false, true)
     }
   } catch (error) {
     if (signal.aborted) return { toolCalls: [] }
@@ -129,11 +179,19 @@ export async function streamChatCompletion(params: StreamChatParams): Promise<St
   }
 }
 
-/** Ollama 等对不支持工具的模型返回 400 "does not support tools" */
-function isToolsUnsupported(error: unknown): boolean {
-  return (
-    error instanceof OpenAI.BadRequestError && /tool/i.test(error.message)
-  )
+/** 报错文案是否指向「不认 tools」:Ollama 等对不支持工具的模型返回 400 */
+export function toolsRejected(message: string): boolean {
+  return /tool/i.test(message)
+}
+
+/** 报错文案是否指向「不认 stream_options」:老兼容层会把它当成未知字段 */
+export function usageRejected(message: string): boolean {
+  return /stream_options|include_usage/i.test(message)
+}
+
+/** 只在 400 上判断文案:401/429 之类的操作者错误不能当成「参数不支持」去降级重试 */
+function isRejectedParam(error: unknown, rejects: (message: string) => boolean): boolean {
+  return error instanceof OpenAI.BadRequestError && rejects(error.message)
 }
 
 /** 把 SDK 的各类错误归一化为面向用户的中文提示 */

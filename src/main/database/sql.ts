@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS messages (
   parent_call_id  TEXT NOT NULL DEFAULT '',
   -- 嵌套深度:0 = 主 agent,1 = 子 agent
   depth           INTEGER NOT NULL DEFAULT 0,
+  -- 本步的 token 用量;仅 assistant 行有意义,其余为 0
+  prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  -- 1 = 端点未上报 usage,上面两个数是本地估算值
+  tokens_estimated INTEGER NOT NULL DEFAULT 0,
   created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -79,6 +84,21 @@ export const columnMigrations: { table: string; column: string; ddl: string }[] 
     table: 'messages',
     column: 'depth',
     ddl: 'ALTER TABLE messages ADD COLUMN depth INTEGER NOT NULL DEFAULT 0'
+  },
+  {
+    table: 'messages',
+    column: 'prompt_tokens',
+    ddl: 'ALTER TABLE messages ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0'
+  },
+  {
+    table: 'messages',
+    column: 'completion_tokens',
+    ddl: 'ALTER TABLE messages ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0'
+  },
+  {
+    table: 'messages',
+    column: 'tokens_estimated',
+    ddl: 'ALTER TABLE messages ADD COLUMN tokens_estimated INTEGER NOT NULL DEFAULT 0'
   }
 ]
 
@@ -109,10 +129,13 @@ export const tableRebuilds: {
         agent           TEXT NOT NULL DEFAULT '',
         parent_call_id  TEXT NOT NULL DEFAULT '',
         depth           INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        tokens_estimated INTEGER NOT NULL DEFAULT 0,
         created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
       );
-      INSERT INTO messages_new (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, created_at)
-        SELECT id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, created_at FROM messages;
+      INSERT INTO messages_new (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, prompt_tokens, completion_tokens, tokens_estimated, created_at)
+        SELECT id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, prompt_tokens, completion_tokens, tokens_estimated, created_at FROM messages;
       DROP TABLE messages;
       ALTER TABLE messages_new RENAME TO messages;
       CREATE INDEX IF NOT EXISTS idx_messages_conversation_created

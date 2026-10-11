@@ -1,4 +1,4 @@
-import type { ToolCallRecord } from '../../../main/chat/dto'
+import type { ContextMeter, TokenUsage, ToolCallRecord } from '../../../main/chat/dto'
 
 /** 流式中的一个工具调用及其执行状态 */
 export interface StreamingToolCall extends ToolCallRecord {
@@ -21,6 +21,10 @@ export interface AgentStep {
   content: string
   reasoning: string
   toolCalls: StreamingToolCall[]
+  /** 本步 token 用量;历史行没写过用量时没有 */
+  usage?: TokenUsage
+  /** 本步请求为塞进上下文预算做了什么 */
+  context?: ContextMeter
 }
 
 /**
@@ -106,4 +110,72 @@ export function finalizeStep(step: AgentStep): AgentStep {
       return next
     })
   }
+}
+
+/** 库消息行的三个用量整数列 → 用量对象;旧数据没写过用量,返回 undefined 就不显示 */
+export function toStepUsage(row: {
+  prompt_tokens: number
+  completion_tokens: number
+  tokens_estimated: number
+}): TokenUsage | undefined {
+  if (row.prompt_tokens === 0 && row.completion_tokens === 0) return undefined
+  return {
+    prompt: row.prompt_tokens,
+    completion: row.completion_tokens,
+    estimated: row.tokens_estimated === 1
+  }
+}
+
+/** 一次回复(含子 Agent)的用量合计 */
+export interface UsageSummary {
+  /** 最近一次请求的输入占用 —— 各步的输入是包含关系,相加会把同一批历史数好几遍 */
+  prompt: number
+  /** 各步输出之和,才是这次回复真正生成的量 */
+  completion: number
+  /** 只要有一步是估算值就整体标估算:混合显示更说不清 */
+  estimated: boolean
+  /** 为塞进预算丢弃的历史轮数(取各步最大值,裁的是同一份上下文) */
+  droppedTurns: number
+  /** 最近一轮内部被弃掉的消息条数 */
+  droppedMessages: number
+  /** 被就地缩写的消息条数 */
+  shrunkMessages: number
+}
+
+/**
+ * 把一个回复的各步(递归含子 Agent)汇总成一行显示。
+ * 子 Agent 的用量必须并进来:它确实花了 token,少算等于报假账。
+ */
+export function summarizeUsage(steps: AgentStep[]): UsageSummary | null {
+  const summary: UsageSummary = {
+    prompt: 0,
+    completion: 0,
+    estimated: false,
+    droppedTurns: 0,
+    droppedMessages: 0,
+    shrunkMessages: 0
+  }
+  let found = false
+
+  const visit = (list: AgentStep[]): void => {
+    for (const step of list) {
+      if (step.usage) {
+        found = true
+        summary.prompt = Math.max(summary.prompt, step.usage.prompt)
+        summary.completion += step.usage.completion
+        summary.estimated = summary.estimated || step.usage.estimated
+      }
+      if (step.context) {
+        summary.droppedTurns = Math.max(summary.droppedTurns, step.context.droppedTurns)
+        summary.droppedMessages = Math.max(summary.droppedMessages, step.context.droppedMessages)
+        summary.shrunkMessages = Math.max(summary.shrunkMessages, step.context.shrunkMessages)
+      }
+      for (const call of step.toolCalls) {
+        if (call.agentSteps) visit(call.agentSteps)
+      }
+    }
+  }
+  visit(steps)
+
+  return found ? summary : null
 }

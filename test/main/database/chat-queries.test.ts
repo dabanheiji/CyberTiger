@@ -55,6 +55,28 @@ function rows(sql: string, ...params: SQLInputValue[]): MessageRow[] {
   return db.prepare(sql).all(...params) as unknown as MessageRow[]
 }
 
+/**
+ * 按 chatSql 的写回语句更新一步。
+ * 参数顺序必须与 service 的落库实现严格一致 —— 错位会把数字写进文本列。
+ */
+function updateStep(
+  id: string,
+  content: string,
+  reasoning: string,
+  toolCalls: string,
+  usage = { prompt: 0, completion: 0, estimated: true }
+): void {
+  db.prepare(chatSql.messages.updateStep).run(
+    content,
+    reasoning,
+    toolCalls,
+    usage.prompt,
+    usage.completion,
+    usage.estimated ? 1 : 0,
+    id
+  )
+}
+
 beforeEach(() => {
   db = openDb()
 })
@@ -129,14 +151,14 @@ describe('消息表的分层读取', () => {
     addConversation('c1')
     db.prepare(chatSql.messages.add).run('u1', 'c1', 'user', '帮我调研一下', '')
     addStep('a1', scope())
-    db.prepare(chatSql.messages.updateStep).run(
+    updateStep(
+      'a1',
       '',
       '',
-      JSON.stringify([{ id: 'task-1', name: 'task', arguments: '{"prompt":"调研"}' }]),
-      'a1'
+      JSON.stringify([{ id: 'task-1', name: 'task', arguments: '{"prompt":"调研"}' }])
     )
     addStep('sa1', scope({ agent: 'researcher', parentCallId: 'task-1', depth: 1 }))
-    db.prepare(chatSql.messages.updateStep).run('子结论', '子思考', '[]', 'sa1')
+    updateStep('sa1', '子结论', '子思考', '[]')
     addTool(
       'st1',
       scope({ agent: 'researcher', parentCallId: 'task-1', depth: 1 }),
@@ -145,7 +167,7 @@ describe('消息表的分层读取', () => {
     )
     addTool('t1', scope(), 'task-1', '子 Agent 的结论')
     addStep('a2', scope())
-    db.prepare(chatSql.messages.updateStep).run('综合结论', '', '[]', 'a2')
+    updateStep('a2', '综合结论', '', '[]')
   }
 
   it('list 给出全部行,含子 agent 的嵌套行', () => {
@@ -245,17 +267,31 @@ describe('消息表的分层读取', () => {
   it('updateStep 只按 id 改内容,不动归属字段', () => {
     addConversation('c1')
     addStep('a1', scope({ agent: 'researcher', parentCallId: 'task-1', depth: 1 }))
-    db.prepare(chatSql.messages.updateStep).run(
-      '正文',
-      '思考',
-      '[{"id":"1","name":"t","arguments":"{}"}]',
-      'a1'
-    )
+    updateStep('a1', '正文', '思考', '[{"id":"1","name":"t","arguments":"{}"}]')
     expect(rows(chatSql.messages.list, 'c1')[0]).toMatchObject({
       content: '正文',
       reasoning: '思考',
       agent: 'researcher',
       depth: 1
+    })
+  })
+
+  it('updateStep 把用量三列一起写回,估算标记存成 0/1', () => {
+    addConversation('c1')
+    addStep('a1', scope())
+    addStep('a2', scope())
+    updateStep('a1', '真实用量', '', '[]', { prompt: 1200, completion: 80, estimated: false })
+    updateStep('a2', '估算用量', '', '[]', { prompt: 900, completion: 40, estimated: true })
+    const [first, second] = rows(chatSql.messages.list, 'c1')
+    expect(first).toMatchObject({
+      prompt_tokens: 1200,
+      completion_tokens: 80,
+      tokens_estimated: 0
+    })
+    expect(second).toMatchObject({
+      prompt_tokens: 900,
+      completion_tokens: 40,
+      tokens_estimated: 1
     })
   })
 })
@@ -277,11 +313,12 @@ describe('tool_calls 列的 JSON 往返', () => {
   it('rowToMessage 把行转成对外消息,其余字段原样带出', () => {
     addConversation('c1')
     addStep('a1', scope())
-    db.prepare(chatSql.messages.updateStep).run(
+    updateStep(
+      'a1',
       '答案',
       '推理',
       JSON.stringify([{ id: 'task-1', name: 'task', arguments: '{}' }]),
-      'a1'
+      { prompt: 321, completion: 12, estimated: false }
     )
     const message = rowToMessage(rows(chatSql.messages.list, 'c1')[0])
     expect(message).toMatchObject({
@@ -291,7 +328,10 @@ describe('tool_calls 列的 JSON 往返', () => {
       content: '答案',
       reasoning: '推理',
       skill: '',
-      parent_call_id: ''
+      parent_call_id: '',
+      prompt_tokens: 321,
+      completion_tokens: 12,
+      tokens_estimated: 0
     })
     expect(message.tool_calls).toEqual([{ id: 'task-1', name: 'task', arguments: '{}' }])
   })
@@ -300,7 +340,7 @@ describe('tool_calls 列的 JSON 往返', () => {
     addConversation('c1')
     addStep('a1', scope())
     db.prepare("UPDATE messages SET tool_calls = '坏了' WHERE id = 'a1'").run()
-    db.prepare(chatSql.messages.updateStep).run('答案', '', '坏了', 'a1')
+    updateStep('a1', '答案', '', '坏了')
     const messages = rows(chatSql.messages.listTopLevel, 'c1').map(rowToMessage)
     expect(messages[0].tool_calls).toEqual([])
     expect(messages[0].content).toBe('答案')

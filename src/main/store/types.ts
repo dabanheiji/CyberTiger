@@ -49,6 +49,11 @@ export interface AppSettings {
   disabledAgents?: string[]
   /** 是否允许主 Agent 派生子 Agent;未设置视为允许 */
   enableSubAgent?: boolean
+  /**
+   * 当前模型的上下文窗口大小(token)。
+   * 全局一个值:换模型时得跟着改,否则裁剪会按错的预算算。未设置按 32k 兜底。
+   */
+  contextWindow?: number
   /** 下载私有仓库 skill 时使用;暂无设置 UI */
   githubToken?: string
   /** 窗口大小/位置,由主进程维护,渲染层不使用 */

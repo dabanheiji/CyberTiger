@@ -1,6 +1,7 @@
 import XMarkdown from '@ant-design/x-markdown'
 import { Typography, theme } from 'antd'
-import type { AgentStep, StreamingToolCall } from '../lib/agentSteps'
+import { formatTokens } from '../../../main/tokens/estimate'
+import { summarizeUsage, type AgentStep, type StreamingToolCall } from '../lib/agentSteps'
 import ReasoningBox from './ReasoningBox'
 import ToolCallChain from './ToolCallChain'
 
@@ -31,6 +32,8 @@ function AgentSteps({ steps, streaming }: AgentStepsProps): React.JSX.Element {
   // "还在思考"按整个回复判断:一旦产出正文就收起。
   // 若按单步判断,每进入新的一步都会重新展开再折叠,闪得厉害。
   const thinking = streaming && contents.length === 0
+  // 用量挂在每一步上,汇总成一行显示;子 Agent 的用量已经并进来
+  const usage = summarizeUsage(steps)
 
   return (
     <>
@@ -44,6 +47,14 @@ function AgentSteps({ steps, streaming }: AgentStepsProps): React.JSX.Element {
       {contents.map((item) => (
         <XMarkdown key={item.id} content={item.text} />
       ))}
+      {usage && (
+        <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
+          {`上下文 ${formatTokens(usage.prompt)}${usage.estimated ? '(估算)' : ''} · 输出 ${formatTokens(usage.completion)}`}
+          {usage.droppedTurns > 0 ? ` · 已省略 ${usage.droppedTurns} 轮历史` : ''}
+          {usage.droppedMessages > 0 ? ` · 弃掉本轮 ${usage.droppedMessages} 步` : ''}
+          {usage.shrunkMessages > 0 ? ` · 缩写 ${usage.shrunkMessages} 条` : ''}
+        </Typography.Text>
+      )}
     </>
   )
 }

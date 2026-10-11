@@ -18,6 +18,9 @@ export function makeMessage(overrides: Partial<Message> = {}): Message {
     agent: '',
     parent_call_id: '',
     depth: 0,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    tokens_estimated: 0,
     created_at: '2026-10-08 10:00:00',
     ...overrides
   }

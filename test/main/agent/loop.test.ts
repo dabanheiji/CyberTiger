@@ -1,5 +1,7 @@
 import { MAIN_AGENT_MAX_STEPS, runAgent, type RunAgentParams } from '../../../src/main/agent/loop'
 import { STEP_LIMIT_PROMPT } from '../../../src/main/agent/prompt'
+import type { ContextBudget } from '../../../src/main/agent/context'
+import { estimateRequestTokens } from '../../../src/main/tokens/estimate'
 import type { ChatCompletionMessage } from '../../../src/main/chat/llm'
 import type { ChatStreamEvent, RunScope } from '../../../src/main/chat/dto'
 import {
@@ -24,6 +26,8 @@ interface RunOptions {
   signal?: AbortSignal
   /** 覆盖脚本化的模型,用于模拟报错 */
   stream?: RunAgentParams['stream']
+  /** 上下文预算;不给则用 loop 的默认值(32k 兜底窗口) */
+  budget?: ContextBudget
 }
 
 interface RunOutcome {
@@ -47,6 +51,7 @@ async function run(options: RunOptions = {}): Promise<RunOutcome> {
     maxSteps: options.maxSteps ?? MAIN_AGENT_MAX_STEPS,
     store,
     emit,
+    ...(options.budget ? { budget: options.budget } : {}),
     stream: options.stream ?? model.stream
   })
   return { result, requests: model.requests, store, events: collected.events }
@@ -56,6 +61,20 @@ async function run(options: RunOptions = {}): Promise<RunOutcome> {
 function lastContentOf(messages: ChatCompletionMessage[]): string {
   const last = messages[messages.length - 1]
   return typeof last?.content === 'string' ? last.content : ''
+}
+
+/**
+ * 断言一条请求里没有孤儿 tool_calls:每个 assistant 发起的调用都能在同一条请求里
+ * 找到对应的 tool 行。严格的 OpenAI 兼容端点对缺失响应的调用直接返回 400,
+ * 而裁剪最容易在这里出错 —— 所以每条被压缩过的请求都要过这一关。
+ */
+function expectNoOrphanCalls(messages: ChatCompletionMessage[]): void {
+  const answered = new Set(messages.filter((m) => m.role === 'tool').map((m) => m.tool_call_id))
+  const orphans = messages
+    .filter((m) => m.role === 'assistant')
+    .flatMap((m) => m.tool_calls ?? [])
+    .filter((call) => !answered.has(call.id))
+  expect(orphans.map((c) => c.id)).toEqual([])
 }
 
 describe('runAgent 的基本循环', () => {
@@ -68,8 +87,15 @@ describe('runAgent 的基本循环', () => {
     const step = [...store.steps.values()][0]
     expect(step.content).toBe('前半')
     expect(step.reasoning).toBe('先想想')
-    // reasoning 与 content 分开推流:1 条思考 + 正文被拆成 2 条
-    expect(events.map((e) => e.type)).toEqual(['step_start', 'delta', 'delta', 'delta', 'done'])
+    // reasoning 与 content 分开推流:1 条思考 + 正文被拆成 2 条;用量在正文之后单独一条
+    expect(events.map((e) => e.type)).toEqual([
+      'step_start',
+      'delta',
+      'delta',
+      'delta',
+      'usage',
+      'done'
+    ])
     expect(events.filter((e) => e.type === 'delta')).toMatchObject([
       { reasoning: '先想想', content: '' },
       { reasoning: '', content: '前' },
@@ -306,6 +332,19 @@ describe('目标锚定', () => {
     })
     expect(lastContentOf(requests[1].messages)).not.toMatch(/^\[系统提醒\]/)
   })
+
+  it('锚定声明「已拿到的不需要重新获取」,且不出现诱导重调的祈使句', async () => {
+    const probe = makeTool('r')
+    const { requests } = await run({
+      script: [{ toolCalls: [makeCall('probe', '{}')] }, { content: '结束' }],
+      tools: { probe }
+    })
+    // 锚定以 user 角色重复了原始请求,对小模型就像一条新提问:实测中它据此连着三步
+    // 换着参数重调 get_current_time。所以锚定必须自己补上"已有的够用",且不能说反话。
+    const anchored = lastContentOf(requests[1].messages)
+    expect(anchored).toContain('已拿到的不需要重新获取')
+    expect(anchored).not.toMatch(/请重新调用|再次调用|如需.*调用/)
+  })
 })
 
 describe('步数上限', () => {
@@ -432,5 +471,106 @@ describe('失败与收尾', () => {
   it('只有 reasoning 没有正文的步骤照常落库', async () => {
     const { store } = await run({ script: [{ reasoning: '只想了一下' }] })
     expect([...store.steps.values()][0].reasoning).toBe('只想了一下')
+  })
+})
+
+describe('用量计量', () => {
+  it('端点报了 usage 就原样透传,标成非估算', async () => {
+    const { store, events } = await run({
+      script: [{ content: '答完了', usage: { prompt: 1234, completion: 56 } }]
+    })
+    expect([...store.steps.values()][0].usage).toEqual({
+      prompt: 1234,
+      completion: 56,
+      estimated: false
+    })
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'usage',
+        usage: { prompt: 1234, completion: 56, estimated: false }
+      })
+    )
+  })
+
+  it('端点没报 usage 时退回估算,输入按实际发出去的消息算', async () => {
+    const probe = makeTool('结果')
+    const { requests, store } = await run({
+      script: [{ toolCalls: [makeCall('probe', '{}', 'u1')] }, { content: '前半' }],
+      tools: { probe }
+    })
+    const usage = [...store.steps.values()][1].usage
+    expect(usage?.estimated).toBe(true)
+    // 「前半」两个汉字 → 2 token
+    expect(usage?.completion).toBe(2)
+    expect(usage?.prompt).toBe(estimateRequestTokens(requests[1].messages, requests[1].tools))
+  })
+
+  it('模型报错的那一步不发用量事件', async () => {
+    const { events } = await run({
+      stream: async () => {
+        throw new Error('上下文超长')
+      }
+    })
+    expect(events.some((e) => e.type === 'usage')).toBe(false)
+  })
+
+  it('每步各发一条 usage,带本步实际发生的裁剪计量', async () => {
+    const probe = makeTool('结果')
+    const { events } = await run({
+      budget: { window: 4000, input: 120 },
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'm1')] },
+        { toolCalls: [makeCall('probe', '{"i":2}', 'm2')] },
+        { toolCalls: [makeCall('probe', '{"i":3}', 'm3')] },
+        { content: '结束' }
+      ],
+      tools: { probe }
+    })
+    const usageEvents = events.filter((e) => e.type === 'usage')
+    expect(usageEvents).toHaveLength(4)
+    // 第 3 步起本轮已有 3 个可弃单元,最早的一次调用连同结果被弃掉;
+    // 最后一步多了收尾提示,占掉的位置再弃一组
+    expect(usageEvents.map((e) => ('context' in e ? e.context.droppedMessages : -1))).toEqual([
+      0, 0, 2, 4
+    ])
+  })
+})
+
+describe('上下文裁剪接入循环', () => {
+  it('小预算下裁掉本轮较早的步骤,锚定仍在最后', async () => {
+    const probe = makeTool('结果')
+    const { requests } = await run({
+      budget: { window: 4000, input: 120 },
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'c1')] },
+        { toolCalls: [makeCall('probe', '{"i":2}', 'c2')] },
+        { toolCalls: [makeCall('probe', '{"i":3}', 'c3')] },
+        { content: '结束' }
+      ],
+      tools: { probe }
+    })
+    expect(requests).toHaveLength(4)
+    for (const request of requests) expectNoOrphanCalls(request.messages)
+
+    // 第 1 步什么都没积累,第 3 步只留得下最新一次调用
+    expect(requests[0].messages.filter((m) => m.role === 'tool')).toHaveLength(0)
+    const third = requests[2].messages
+    expect(third.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)).toEqual(['c2'])
+    expect(lastContentOf(third)).toMatch(/^\[系统提醒\]/)
+  })
+
+  it('默认预算下不动本轮的工具结果', async () => {
+    const probe = makeTool('结果')
+    const { requests } = await run({
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'd1')] },
+        { toolCalls: [makeCall('probe', '{"i":2}', 'd2')] },
+        { content: '结束' }
+      ],
+      tools: { probe }
+    })
+    const third = requests[1].messages
+    expect(third.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)).toEqual(['d1'])
+    expect(requests[2].messages.filter((m) => m.role === 'tool')).toHaveLength(2)
   })
 })
