@@ -1,8 +1,14 @@
-import { firstRef, normalizeRef } from '../../../src/main/store/modelRef'
-import type { ModelProvider } from '../../../src/main/store/types'
+import { contextWindowOf, firstRef, normalizeRef } from '../../../src/main/store/modelRef'
+import type { ModelConfig, ModelProvider } from '../../../src/main/store/types'
 
-function provider(id: string, models: string[]): ModelProvider {
-  return { id, name: id, baseUrl: `https://${id}.test/v1`, models }
+/** 用例大多只关心模型名,所以允许直接传字符串;要测窗口就传完整的 ModelConfig */
+function provider(id: string, models: Array<string | ModelConfig>): ModelProvider {
+  return {
+    id,
+    name: id,
+    baseUrl: `https://${id}.test/v1`,
+    models: models.map((m) => (typeof m === 'string' ? { name: m } : m))
+  }
 }
 
 const DEEPSEEK = provider('p-deepseek', ['deepseek-chat', 'deepseek-reasoner'])
@@ -68,5 +74,33 @@ describe('normalizeRef', () => {
       providerId: 'p-b',
       model: 'other'
     })
+  })
+})
+
+describe('contextWindowOf', () => {
+  it('取模型自己配置的窗口', () => {
+    const p = provider('p-1', [{ name: 'qwen3.5:4b', contextWindow: 262_144 }, 'other'])
+    expect(contextWindowOf(p, 'qwen3.5:4b')).toBe(262_144)
+  })
+
+  it('没配窗口返回 undefined,由 budgetFor 退回默认值', () => {
+    expect(contextWindowOf(provider('p-1', ['m']), 'm')).toBeUndefined()
+  })
+
+  it('模型不在候选清单里同样返回 undefined —— 清单不是白名单,手输的模型按默认窗口算', () => {
+    expect(
+      contextWindowOf(provider('p-1', [{ name: 'a', contextWindow: 8192 }]), 'b')
+    ).toBeUndefined()
+  })
+
+  it('服务商缺失时返回 undefined 而不是抛错', () => {
+    expect(contextWindowOf(undefined, 'm')).toBeUndefined()
+  })
+
+  it('同名模型分属两家服务商时各取各的', () => {
+    const a = provider('p-a', [{ name: 'same', contextWindow: 32_768 }])
+    const b = provider('p-b', [{ name: 'same', contextWindow: 1_048_576 }])
+    expect(contextWindowOf(a, 'same')).toBe(32_768)
+    expect(contextWindowOf(b, 'same')).toBe(1_048_576)
   })
 })

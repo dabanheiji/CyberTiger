@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { IpcResult } from '../../../main/chat/dto'
 import type { ModelRef } from '../../../main/store/types'
-import { emptyStep, mapCall, mapStep, type AgentStep } from '../lib/agentSteps'
+import { ensureStep, mapCall, mapStep, type AgentStep } from '../lib/agentSteps'
 
 export type { AgentStep, StreamingToolCall } from '../lib/agentSteps'
 
@@ -55,37 +55,32 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
 
       switch (event.type) {
         case 'step_start':
-          update({
-            ...current,
-            steps:
-              event.scope.parentCallId === ''
-                ? [...current.steps, emptyStep(event.messageId)]
-                : mapCall(current.steps, event.scope.parentCallId, (call) => ({
-                    ...call,
-                    agentName: event.scope.agent,
-                    agentSteps: [...(call.agentSteps ?? []), emptyStep(event.messageId)]
-                  }))
-          })
+          update({ ...current, steps: ensureStep(current.steps, event.scope, event.messageId) })
           return
-        case 'delta':
+        case 'delta': {
+          // 建步的那条事件可能没赶上(见 ensureStep),这里先保证步骤有地方落
+          const steps = ensureStep(current.steps, event.scope, event.messageId)
           update({
             ...current,
-            steps: mapStep(current.steps, event.messageId, (step) => ({
+            steps: mapStep(steps, event.messageId, (step) => ({
               ...step,
               content: step.content + event.content,
               reasoning: step.reasoning + event.reasoning
             }))
           })
           return
-        case 'tool_call':
+        }
+        case 'tool_call': {
+          const steps = ensureStep(current.steps, event.scope, event.messageId)
           update({
             ...current,
-            steps: mapStep(current.steps, event.messageId, (step) => ({
+            steps: mapStep(steps, event.messageId, (step) => ({
               ...step,
               toolCalls: [...step.toolCalls, { ...event.call, status: 'running' }]
             }))
           })
           return
+        }
         case 'tool_result':
           update({
             ...current,
@@ -97,16 +92,18 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
             }))
           })
           return
-        case 'usage':
+        case 'usage': {
+          const steps = ensureStep(current.steps, event.scope, event.messageId)
           update({
             ...current,
-            steps: mapStep(current.steps, event.messageId, (step) => ({
+            steps: mapStep(steps, event.messageId, (step) => ({
               ...step,
               usage: event.usage,
               context: event.context
             }))
           })
           return
+        }
         case 'done':
           await optionsRef.current.onDone(event.scope.conversationId, event.aborted)
           break

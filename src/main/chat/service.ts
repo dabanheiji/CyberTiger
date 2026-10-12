@@ -259,7 +259,8 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
     if (!targetProvider) throw new Error('父级服务商已不存在,无法派生子 Agent')
     const connection = resolveConnection({
       providerId: targetProvider.id,
-      model: role.model ?? (roleProvider ? roleProvider.models[0] : ctx.parentRef.model)
+      // 新服务商一个模型都没填时退回父级那个,总比把 undefined 当模型名发出去好
+      model: role.model ?? roleProvider?.models[0]?.name ?? ctx.parentRef.model
     })
 
     const scope: RunScope = {
@@ -295,7 +296,9 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
       maxSteps: SUB_AGENT_MAX_STEPS,
       store: agentStore,
       emit: ctx.emit,
-      budget: budgetFor(store.get('contextWindow'))
+      // 按子 Agent 自己那个模型的窗口裁剪:角色的 AGENT.md 可以指定别的模型,
+      // 沿用父级的窗口就会算错预算
+      budget: budgetFor(connection.contextWindow)
     })
 
     if (result.error && !result.finalContent) {
@@ -322,7 +325,7 @@ export function generateReply(
     ? { providerId: dto.providerId, model: dto.model }
     : normalizeRef(store.get('currentModel'), listProviders())
   if (!ref) throw new Error('请先在设置中配置模型服务商')
-  const { baseUrl, apiKey, model } = resolveConnection(ref)
+  const { baseUrl, apiKey, model, contextWindow } = resolveConnection(ref)
 
   const messages = listTopLevelMessages(dto.conversationId)
   if (!messages.some((m) => m.role === 'user')) throw new Error('会话不存在或没有可发送的消息')
@@ -368,7 +371,8 @@ export function generateReply(
     history: buildHistory(messages, definitions),
     runner: createToolRunner(tools),
     maxSteps: MAIN_AGENT_MAX_STEPS,
-    budget: budgetFor(store.get('contextWindow')),
+    // 窗口跟着本次解析出的连接走:换服务商 / 换模型都自动跟着变,不再依赖一个全局值
+    budget: budgetFor(contextWindow),
     store: agentStore,
     emit
   }).finally(() => {

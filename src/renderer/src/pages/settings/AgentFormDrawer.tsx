@@ -167,8 +167,8 @@ function AgentFormDrawer({
               .map((p) => ({
                 label: p.name,
                 options: p.models.map((model) => ({
-                  value: modelKey({ providerId: p.id, model }),
-                  label: model
+                  value: modelKey({ providerId: p.id, model: model.name }),
+                  label: model.name
                 }))
               }))}
             labelRender={({ value }) => {

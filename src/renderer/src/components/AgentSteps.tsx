@@ -2,6 +2,7 @@ import XMarkdown from '@ant-design/x-markdown'
 import { Typography, theme } from 'antd'
 import { formatTokens } from '../../../main/tokens/estimate'
 import { summarizeUsage, type AgentStep, type StreamingToolCall } from '../lib/agentSteps'
+import { contextShare } from '../lib/contextUsage'
 import ReasoningBox from './ReasoningBox'
 import ToolCallChain from './ToolCallChain'
 
@@ -9,6 +10,12 @@ interface AgentStepsProps {
   steps: AgentStep[]
   /** 这组步骤所属的 run 仍在进行中 */
   streaming: boolean
+  /**
+   * 当前模型的上下文窗口;传了才在用量后面补百分比。
+   * 子 Agent 面板不传 —— 它用的是另一份上下文,窗口还可能不是同一个模型,
+   * 按主会话的窗口算出来的比例是假数。
+   */
+  contextWindow?: number
 }
 
 /**
@@ -18,7 +25,7 @@ interface AgentStepsProps {
  * 一长串重复的「深度思考」,信息密度反而更低,也看不出哪段思考对应哪次行动。
  * 主气泡与子 Agent 面板共用此组件,子 Agent 面板里会递归渲染它自己。
  */
-function AgentSteps({ steps, streaming }: AgentStepsProps): React.JSX.Element {
+function AgentSteps({ steps, streaming, contextWindow }: AgentStepsProps): React.JSX.Element {
   // 各步的思考按顺序拼进同一个框
   const reasoning = steps
     .map((step) => step.reasoning)
@@ -49,7 +56,7 @@ function AgentSteps({ steps, streaming }: AgentStepsProps): React.JSX.Element {
       ))}
       {usage && (
         <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-          {`上下文 ${formatTokens(usage.prompt)}${usage.estimated ? '(估算)' : ''} · 输出 ${formatTokens(usage.completion)}`}
+          {`上下文 ${formatTokens(usage.prompt)}${usage.estimated ? '(估算)' : ''}${contextShare(usage.prompt, contextWindow)} · 输出 ${formatTokens(usage.completion)}`}
           {usage.droppedTurns > 0 ? ` · 已省略 ${usage.droppedTurns} 轮历史` : ''}
           {usage.droppedMessages > 0 ? ` · 弃掉本轮 ${usage.droppedMessages} 步` : ''}
           {usage.shrunkMessages > 0 ? ` · 缩写 ${usage.shrunkMessages} 条` : ''}

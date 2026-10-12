@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Button, Drawer, Form, Input, Space, Typography } from 'antd'
+import { Button, Drawer, Form, Input, InputNumber, Space, Typography } from 'antd'
 import { MinusCircleOutlined, PlusOutlined } from '@ant-design/icons'
-import type { ModelProvider, ModelProviderDraft } from '../../../../main/store/types'
+import type {
+  ModelConfigDraft,
+  ModelProvider,
+  ModelProviderDraft
+} from '../../../../main/store/types'
 
 interface ProviderFormDrawerProps {
   open: boolean
@@ -32,7 +36,7 @@ function ProviderFormDrawer({
       name: provider?.name ?? '',
       baseUrl: provider?.baseUrl ?? '',
       apiKey: provider?.apiKey ?? '',
-      models: provider?.models.length ? provider.models : ['']
+      models: provider?.models.length ? provider.models : [{ name: '' }]
     })
   }, [open, provider, form])
 
@@ -45,7 +49,12 @@ function ProviderFormDrawer({
     }
     setSaving(true)
     try {
-      if (await onSubmit({ ...draft, models: (draft.models ?? []).map((m) => m.trim()) })) {
+      if (
+        await onSubmit({
+          ...draft,
+          models: (draft.models ?? []).map((m) => ({ ...m, name: m.name?.trim() ?? '' }))
+        })
+      ) {
         onClose()
       }
     } finally {
@@ -57,7 +66,7 @@ function ProviderFormDrawer({
     <Drawer
       open={open}
       title={provider ? `编辑服务商:${provider.name}` : '新建模型服务商'}
-      width={560}
+      width={620}
       onClose={onClose}
       destroyOnHidden
       footer={
@@ -108,30 +117,45 @@ function ProviderFormDrawer({
           <Input.Password placeholder="sk-..." />
         </Form.Item>
 
-        <Form.Item label="模型列表" extra="这里是选择器里的候选清单,填服务端支持的模型 ID 即可。">
+        <Form.Item
+          label="模型列表"
+          extra="每行一个模型:左边是服务端支持的模型 ID,右边是它的上下文窗口。"
+        >
           <Form.List name="models">
             {(fields, { add, remove }) => (
               <Space direction="vertical" style={{ width: '100%' }} size="small">
                 {fields.map((field) => (
                   <Space key={field.key} align="start" style={{ width: '100%' }}>
                     <Form.Item
-                      name={field.name}
+                      name={[field.name, 'name']}
                       rules={[
                         { required: true, whitespace: true, message: '请输入模型 ID' },
                         {
                           validator: (_rule, value: string) => {
-                            const list: string[] = form.getFieldValue('models') ?? []
+                            const list: ModelConfigDraft[] = form.getFieldValue('models') ?? []
                             const id = value?.trim()
-                            if (id && list.filter((m) => m?.trim() === id).length > 1) {
+                            if (id && list.filter((m) => m?.name?.trim() === id).length > 1) {
                               return Promise.reject(new Error('模型 ID 重复'))
                             }
                             return Promise.resolve()
                           }
                         }
                       ]}
-                      style={{ flex: 1, marginBottom: 0, minWidth: 320 }}
+                      style={{ flex: 1, marginBottom: 0, minWidth: 200 }}
                     >
                       <Input placeholder="例如 deepseek-chat" />
+                    </Form.Item>
+                    <Form.Item
+                      name={[field.name, 'contextWindow']}
+                      style={{ marginBottom: 0, width: 150 }}
+                    >
+                      <InputNumber
+                        min={8192}
+                        max={10_000_000}
+                        step={1024}
+                        placeholder="默认 131072"
+                        style={{ width: '100%' }}
+                      />
                     </Form.Item>
                     <Button
                       type="text"
@@ -141,7 +165,12 @@ function ProviderFormDrawer({
                     />
                   </Space>
                 ))}
-                <Button type="dashed" block icon={<PlusOutlined />} onClick={() => add('')}>
+                <Button
+                  type="dashed"
+                  block
+                  icon={<PlusOutlined />}
+                  onClick={() => add({ name: '' })}
+                >
                   添加模型
                 </Button>
               </Space>
@@ -150,7 +179,8 @@ function ProviderFormDrawer({
         </Form.Item>
 
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          模型清单只是候选,不做白名单校验 —— 服务端支持什么由服务端决定。
+          模型清单只是候选,不做白名单校验 —— 服务端支持什么由服务端决定;不在清单里的模型按默认
+          131072 token 的窗口算。窗口只影响本地裁剪时机:填得比服务端真实值大,历史会被静默截断。
         </Typography.Text>
       </Form>
     </Drawer>

@@ -1,5 +1,5 @@
 import { store } from './index'
-import { normalizeRef } from './modelRef'
+import { contextWindowOf, normalizeRef } from './modelRef'
 import type { ModelProvider, ModelRef } from './types'
 
 export { firstRef, normalizeRef } from './modelRef'
@@ -33,6 +33,12 @@ export interface ResolvedConnection {
   baseUrl: string
   apiKey?: string
   model: string
+  /**
+   * 该模型配置的上下文窗口;没配是 undefined,由 budgetFor 退回默认值。
+   * 跟着连接一起给出,是为了让「用哪个模型」和「按多大的窗口裁剪」来自同一次解析,
+   * 不会再出现换了服务商却忘了改全局窗口那种两套数据。
+   */
+  contextWindow?: number
 }
 
 /**
@@ -48,6 +54,7 @@ export function resolveConnection(ref: ModelRef): ResolvedConnection {
     providerName: provider.name,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
-    model: ref.model
+    model: ref.model,
+    contextWindow: contextWindowOf(provider, ref.model)
   }
 }

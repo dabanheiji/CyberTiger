@@ -71,8 +71,8 @@ function budget(input: number): ContextBudget {
 }
 
 describe('budgetFor', () => {
-  it('缺省按 32k 兜底窗口留出输出预留与安全边界', () => {
-    expect(budgetFor()).toEqual({ window: DEFAULT_CONTEXT_WINDOW, input: 23_200 })
+  it('缺省按 128k 兜底窗口留出输出预留与安全边界', () => {
+    expect(budgetFor()).toEqual({ window: DEFAULT_CONTEXT_WINDOW, input: 107_411 })
   })
 
   it('窗口不大于输出预留时退回兜底值,不算出负额度', () => {
@@ -82,7 +82,7 @@ describe('budgetFor', () => {
   })
 
   it('窗口小到扣不出输出预留时按 0 算,不给负额度', () => {
-    // 设置里的最小值是 4096:4096 × 85% 本来就小于 4000 的输出预留
+    // 表单里的最小值是 8192,但 store 可以被手改成任何数:4096 × 85% 小于 4000 的输出预留
     expect(budgetFor(4096).input).toBe(0)
   })
 

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Bubble, Sender, Suggestion, Welcome } from '@ant-design/x'
 import type { BubbleListProps } from '@ant-design/x'
 import XMarkdown from '@ant-design/x-markdown'
-import { Avatar, Button, Flex, Select, Tag, theme } from 'antd'
+import { Avatar, Button, Flex, Progress, Select, Space, Tag, Tooltip, theme } from 'antd'
 import {
   RobotOutlined,
   SettingOutlined,
@@ -11,7 +11,11 @@ import {
 } from '@ant-design/icons'
 import type { Message } from '../../../../main/chat/sql'
 import type { ModelProvider, ModelRef } from '../../../../main/store/types'
+import { contextWindowOf } from '../../../../main/store/modelRef'
+import { budgetFor } from '../../../../main/agent/context'
+import { formatTokens } from '../../../../main/tokens/estimate'
 import { modelKey, parseModelKey } from '../../lib/modelRef'
+import { contextUsage, usageLevel, type ContextUsage } from '../../lib/contextUsage'
 import type { AgentStep, StreamingRun, StreamingToolCall } from '../../hooks/useAgentStream'
 import { attachToolResult, finalizeStep, findCall, toStepUsage } from '../../lib/agentSteps'
 import { useSkills } from '../../hooks/useSkills'
@@ -27,6 +31,12 @@ interface AssistantBubbleContent {
   steps: AgentStep[]
   /** 该气泡对应的 run 正在进行中 */
   streaming: boolean
+  /**
+   * 用来把「本条回复的上下文占用」换算成百分比的窗口。
+   * 库里的行没记录当时用的是哪个模型,所以按当前所选模型的窗口算 ——
+   * 中途换过模型的老气泡会因此偏差,进度条才是当前会话的权威读数。
+   */
+  contextWindow?: number
 }
 
 interface ChatPanelProps {
@@ -73,7 +83,7 @@ const roles: BubbleListProps['role'] = {
     variant: 'outlined',
     avatar: <Avatar icon={<RobotOutlined />} />,
     contentRender: (msg: AssistantBubbleContent) => (
-      <AgentSteps steps={msg.steps} streaming={msg.streaming} />
+      <AgentSteps steps={msg.steps} streaming={msg.streaming} contextWindow={msg.contextWindow} />
     )
   }
 }
@@ -165,6 +175,51 @@ function groupMessages(messages: Message[]): MessageGroup[] {
   }))
 }
 
+interface ContextRingProps {
+  usage: ContextUsage
+}
+
+/**
+ * 输入框底栏的上下文占用环。
+ * 满刻度是当前模型的窗口,环上不写数字(底栏太挤),已用 / 窗口 / 裁剪点都放进 Tooltip。
+ */
+function ContextRing({ usage }: ContextRingProps): React.JSX.Element {
+  const { token } = theme.useToken()
+  const level = usageLevel(usage)
+  const color =
+    level === 'danger'
+      ? token.colorError
+      : level === 'warning'
+        ? token.colorWarning
+        : token.colorPrimary
+  const percent = Math.round(usage.ratio * 100)
+  const trimPercent = Math.round((usage.trimAt / usage.window) * 100)
+
+  return (
+    <Tooltip
+      title={
+        <>
+          {`已用 ${formatTokens(usage.used)}${usage.estimated ? '(估算)' : ''} / 窗口 ${formatTokens(usage.window)}`}
+          <br />
+          {`到 ${formatTokens(usage.trimAt)}(窗口的 ${trimPercent}%)就开始省略最旧的历史`}
+        </>
+      }
+    >
+      <Progress
+        type="circle"
+        percent={percent}
+        showInfo={false}
+        size={16}
+        strokeColor={color}
+        // 根节点默认是 inline-flex,会跟同行高(22px)的基线排版,环被顶离垂直中线;
+        // 改成块级 flex 后条目高度就是环本身,Space 的 align="center" 才能对齐下拉框。
+        // 描边宽度不写:antd 对小圆环按「不小于 3px」自动算,比固定百分比更稳。
+        styles={{ root: { display: 'flex' } }}
+      />
+    </Tooltip>
+  )
+}
+
 function ChatPanel({
   messages,
   streaming,
@@ -185,6 +240,21 @@ function ChatPanel({
   const enabledSkills = skills.filter((s) => s.enabled && !s.error)
   // 没有模型的服务商不参与选择,否则会多出一个空的分组标题
   const selectable = providers.filter((p) => p.models.length > 0)
+  // 窗口跟着当前选择走;气泡底部的百分比和进度条共用同一个数,两处不会各说一套
+  const contextWindow = currentRef
+    ? budgetFor(
+        contextWindowOf(
+          providers.find((p) => p.id === currentRef.providerId),
+          currentRef.model
+        )
+      ).window
+    : undefined
+  const usage = contextUsage({
+    streamingSteps: streaming?.steps,
+    messages,
+    providers,
+    currentRef
+  })
 
   const userIds = new Set(messages.filter((m) => m.role === 'user').map((m) => m.id))
   const items: BubbleListProps['items'] = groupMessages(messages).map((g) => {
@@ -201,7 +271,7 @@ function ChatPanel({
     return {
       key: g.key,
       role: 'assistant',
-      content: { steps, streaming: isStreaming } as AssistantBubbleContent,
+      content: { steps, streaming: isStreaming, contextWindow } as AssistantBubbleContent,
       loading: isStreaming && steps.every(isEmptyStep),
       streaming: isStreaming
     }
@@ -211,7 +281,7 @@ function ChatPanel({
     items.push({
       key: streaming.runId,
       role: 'assistant',
-      content: { steps: streaming.steps, streaming: true } as AssistantBubbleContent,
+      content: { steps: streaming.steps, streaming: true, contextWindow } as AssistantBubbleContent,
       loading: streaming.steps.every(isEmptyStep),
       streaming: true
     })
@@ -338,42 +408,45 @@ function ChatPanel({
               suffix={false}
               footer={(actions) => (
                 <Flex justify="space-between" align="center">
-                  {selectable.length > 0 ? (
-                    <Select<string>
-                      size="small"
-                      variant="borderless"
-                      value={currentRef ? modelKey(currentRef) : undefined}
-                      placeholder="选择模型"
-                      // 按服务商分组;同名模型分属不同服务商时靠分组标题区分
-                      options={selectable.map((p) => ({
-                        label: p.name,
-                        options: p.models.map((model) => ({
-                          value: modelKey({ providerId: p.id, model }),
-                          label: model
-                        }))
-                      }))}
-                      onChange={(key) => onModelChange(parseModelKey(key))}
-                      // 收起时补上服务商名,否则只看到一个 model id 分不清是哪家
-                      labelRender={({ value }) => {
-                        const ref = value === undefined ? undefined : parseModelKey(String(value))
-                        const provider = providers.find((p) => p.id === ref?.providerId)
-                        return provider && ref ? `${provider.name} · ${ref.model}` : String(value)
-                      }}
-                      // 回复途中不允许切模型
-                      disabled={sending}
-                      popupMatchSelectWidth={false}
-                      style={{ minWidth: 160 }}
-                    />
-                  ) : (
-                    <Button
-                      type="link"
-                      size="small"
-                      icon={<SettingOutlined />}
-                      onClick={onOpenSettings}
-                    >
-                      去设置里添加模型
-                    </Button>
-                  )}
+                  <Space align="center" size={8}>
+                    {selectable.length > 0 ? (
+                      <Select<string>
+                        size="small"
+                        variant="borderless"
+                        value={currentRef ? modelKey(currentRef) : undefined}
+                        placeholder="选择模型"
+                        // 按服务商分组;同名模型分属不同服务商时靠分组标题区分
+                        options={selectable.map((p) => ({
+                          label: p.name,
+                          options: p.models.map((model) => ({
+                            value: modelKey({ providerId: p.id, model: model.name }),
+                            label: model.name
+                          }))
+                        }))}
+                        onChange={(key) => onModelChange(parseModelKey(key))}
+                        // 收起时补上服务商名,否则只看到一个 model id 分不清是哪家
+                        labelRender={({ value }) => {
+                          const ref = value === undefined ? undefined : parseModelKey(String(value))
+                          const provider = providers.find((p) => p.id === ref?.providerId)
+                          return provider && ref ? `${provider.name} · ${ref.model}` : String(value)
+                        }}
+                        // 回复途中不允许切模型
+                        disabled={sending}
+                        popupMatchSelectWidth={false}
+                        style={{ minWidth: 160 }}
+                      />
+                    ) : (
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<SettingOutlined />}
+                        onClick={onOpenSettings}
+                      >
+                        去设置里添加模型
+                      </Button>
+                    )}
+                    {usage && <ContextRing usage={usage} />}
+                  </Space>
                   {actions}
                 </Flex>
               )}

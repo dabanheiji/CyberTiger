@@ -1,4 +1,4 @@
-import type { ContextMeter, TokenUsage, ToolCallRecord } from '../../../main/chat/dto'
+import type { ContextMeter, RunScope, TokenUsage, ToolCallRecord } from '../../../main/chat/dto'
 
 /** 流式中的一个工具调用及其执行状态 */
 export interface StreamingToolCall extends ToolCallRecord {
@@ -36,6 +36,39 @@ export interface AgentStep {
 /** 新建一个空步骤 */
 export function emptyStep(messageId: string): AgentStep {
   return { messageId, content: '', reasoning: '', toolCalls: [] }
+}
+
+/** 某个步骤是否已经在树上(含任意深度的子 Agent 步骤) */
+function hasStep(steps: AgentStep[], messageId: string): boolean {
+  return steps.some(
+    (step) =>
+      step.messageId === messageId ||
+      step.toolCalls.some(
+        (call) => call.agentSteps !== undefined && hasStep(call.agentSteps, messageId)
+      )
+  )
+}
+
+/**
+ * 保证这一步在树上存在,已存在就原样返回。
+ *
+ * 正常路径是 `step_start` 建步;但第一步的 `step_start` 经常赶不上:主进程在
+ * `chat:generateReply` 把 runId 应答回去**之前**就把事件发了出去(runAgent 的同步
+ * 前缀里就 emit),渲染层那时还没登记这个 run,事件按 runId 一过滤就被整条丢弃
+ * (实测 200 次里 199 次事件先到)。后续所有按 messageId 定位的事件于是全部落空,
+ * 一次直接作答的 run 看起来就是「一直转到结束,然后整段出现」。
+ *
+ * 落单的步骤只可能是最新的那一步 —— 更早的步骤必然已被自己的 `step_start` 建过,
+ * 所以按 `step_start` 原来的规则追加到末尾(或挂到父调用下)就是正确位置。
+ */
+export function ensureStep(steps: AgentStep[], scope: RunScope, messageId: string): AgentStep[] {
+  if (hasStep(steps, messageId)) return steps
+  if (scope.parentCallId === '') return [...steps, emptyStep(messageId)]
+  return mapCall(steps, scope.parentCallId, (call) => ({
+    ...call,
+    agentName: scope.agent,
+    agentSteps: [...(call.agentSteps ?? []), emptyStep(messageId)]
+  }))
 }
 
 /** 在任意深度查找某个工具调用 */

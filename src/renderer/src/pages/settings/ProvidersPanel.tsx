@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { App, Button, Flex, InputNumber, List, Space, Tag, Typography, theme } from 'antd'
+import { App, Button, Flex, List, Space, Tag, Typography, theme } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import { v4 as uuidv4 } from 'uuid'
 import type { ModelProvider, ModelProviderDraft, ModelRef } from '../../../../main/store/types'
@@ -15,10 +15,6 @@ function ProvidersPanel(): React.JSX.Element {
   const [formOpen, setFormOpen] = useState(false)
   // null = 新建
   const [formProvider, setFormProvider] = useState<ModelProvider | null>(null)
-  // 上下文窗口:全局一个值,换模型得跟着改,否则裁剪按错的预算算
-  const [contextWindow, setContextWindow] = useState<number | null>(null)
-  // 失焦时用它判断是否真的改过,避免点开又走开也写一次库
-  const [savedWindow, setSavedWindow] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -26,20 +22,11 @@ function ProvidersPanel(): React.JSX.Element {
       if (cancelled) return
       setProviders(settings.providers ?? [])
       setCurrentRef(settings.currentModel)
-      setContextWindow(settings.contextWindow ?? null)
-      setSavedWindow(settings.contextWindow ?? null)
     })
     return (): void => {
       cancelled = true
     }
   }, [])
-
-  const saveWindow = async (): Promise<void> => {
-    if (contextWindow === savedWindow) return
-    await window.api.settings.set('contextWindow', contextWindow ?? undefined)
-    setSavedWindow(contextWindow)
-    message.success(contextWindow ? `上下文窗口已设为 ${contextWindow} token` : '已恢复默认窗口')
-  }
 
   /**
    * 服务商写回后必须把"当前选中的模型"一起收敛。
@@ -70,7 +57,10 @@ function ProvidersPanel(): React.JSX.Element {
       name,
       baseUrl: draft.baseUrl.trim(),
       apiKey: draft.apiKey?.trim() || undefined,
-      models: draft.models.filter(Boolean)
+      // 空行丢掉;清空窗口输入框得到的是 null,存成 undefined 才是「用默认值」
+      models: draft.models
+        .map((m) => ({ name: m.name, contextWindow: m.contextWindow ?? undefined }))
+        .filter((m) => m.name !== '')
     }
     const next = formProvider
       ? providers.map((p) => (p.id === provider.id ? provider : p))
@@ -100,7 +90,7 @@ function ProvidersPanel(): React.JSX.Element {
     <div>
       <Flex align="center" justify="space-between" style={{ marginBottom: token.marginXS }}>
         <Typography.Text type="secondary">
-          每个服务商一套接口地址与凭据,模型按服务商分组出现在聊天页的选择器里。
+          每个服务商一套接口地址与凭据,模型按服务商分组出现在聊天页的选择器里;上下文窗口按模型逐个配置。
         </Typography.Text>
         <Button
           size="small"
@@ -167,23 +157,6 @@ function ProvidersPanel(): React.JSX.Element {
           )}
         />
       )}
-
-      <Flex align="center" gap={8} wrap style={{ marginTop: token.marginLG }}>
-        <Typography.Text>上下文窗口</Typography.Text>
-        <InputNumber
-          min={4096}
-          max={1_000_000}
-          step={1024}
-          value={contextWindow}
-          placeholder="32000"
-          style={{ width: 130 }}
-          onChange={(v) => setContextWindow(v)}
-          onBlur={() => void saveWindow()}
-        />
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          单位 token,留空按 32000 算。历史装不下时整轮省略,气泡底部会标注省略了多少。
-        </Typography.Text>
-      </Flex>
 
       <ProviderFormDrawer
         open={formOpen}

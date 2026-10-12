@@ -6,8 +6,12 @@ import {
   estimateTextTokens
 } from '../tokens/estimate'
 
-/** 设置里没配窗口大小时的兜底:按主流 32k 模型算 */
-export const DEFAULT_CONTEXT_WINDOW = 32_000
+/**
+ * 模型没填上下文窗口时的兜底:按主流的 128k 算。
+ * 比早先的 32k 宽松得多 —— 窗口配小了裁剪会提前动手,白丢历史,而界面进度条也跟着说谎。
+ * 本地运行时若把窗口压得更小(Ollama 的 num_ctx),要把模型的实际值配准。
+ */
+export const DEFAULT_CONTEXT_WINDOW = 131_072
 
 /**
  * 从窗口里划走、不参与历史计算的输出预留。
@@ -45,13 +49,13 @@ export interface ContextBudget {
   input: number
 }
 
-/** 把设置里的窗口大小换算成输入额度;无效或缺省都退回兜底值 */
+/** 把模型配置的窗口大小换算成输入额度;无效或缺省都退回兜底值 */
 export function budgetFor(contextWindow?: number): ContextBudget {
   const size =
     typeof contextWindow === 'number' && contextWindow > OUTPUT_RESERVE
       ? contextWindow
       : DEFAULT_CONTEXT_WINDOW
-  // 窗口扣不掉输出预留时按 0 算,不能给负额度 —— 设置里的最小值是 4096,这条一定会被踩到
+  // 窗口扣不掉输出预留时按 0 算,不能给负额度 —— 用户把窗口填得比输出预留还小时会踩到
   return { window: size, input: Math.max(0, Math.floor(size * SAFETY_RATIO) - OUTPUT_RESERVE) }
 }
 

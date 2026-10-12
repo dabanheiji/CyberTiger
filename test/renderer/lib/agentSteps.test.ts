@@ -1,6 +1,7 @@
 import {
   attachToolResult,
   emptyStep,
+  ensureStep,
   finalizeStep,
   findCall,
   mapCall,
@@ -8,6 +9,17 @@ import {
   type AgentStep,
   type StreamingToolCall
 } from '../../../src/renderer/src/lib/agentSteps'
+import type { RunScope } from '../../../src/main/chat/dto'
+
+/** 顶层 run 的作用域;事件都带它,补建步骤时靠它判断挂在哪一层 */
+function root(overrides: Partial<RunScope> = {}): RunScope {
+  return { conversationId: 'c1', runId: 'r1', agent: '', parentCallId: '', depth: 0, ...overrides }
+}
+
+/** 子 Agent run 的作用域 */
+function sub(parentCallId: string, agent = 'researcher'): RunScope {
+  return root({ agent, parentCallId, depth: 1 })
+}
 
 /**
  * 树形 fixture:顶层一步里发起 task 调用,该调用下挂着子 Agent 的一步与其工具。
@@ -205,5 +217,64 @@ describe('finalizeStep', () => {
       toolCalls: [{ id: 'c', name: 't', arguments: '', status: 'error', result: '参数不合法' }]
     }
     expect(finalizeStep(step).toolCalls[0].result).toBe('参数不合法')
+  })
+})
+
+describe('ensureStep', () => {
+  it('step_start 已经建过这一步时原样返回,不重复建', () => {
+    const steps = tree()
+    expect(ensureStep(steps, root(), 'm1')).toBe(steps)
+  })
+
+  it('嵌套里的步骤也算已存在,不会被当成孤儿再加到顶层', () => {
+    // m2 挂在 task-1 下面:只看顶层会误判成孤儿,补出来就是重复的一步
+    const steps = tree()
+    expect(ensureStep(steps, sub('task-1'), 'm2')).toBe(steps)
+  })
+
+  it('顶层孤儿步追加到末尾 —— 第一步的 step_start 赶不上时靠这条恢复流式显示', () => {
+    // 主进程在 chat:generateReply 应答之前就 emit 第一步,渲染层那时还没登记 runId
+    const steps = ensureStep([], root(), 'm1')
+    expect(steps).toEqual([emptyStep('m1')])
+  })
+
+  it('子 Agent 的孤儿步挂到发起它的 task 调用下,并记下角色名', () => {
+    const source: AgentStep[] = [
+      {
+        messageId: 'm1',
+        content: '',
+        reasoning: '',
+        toolCalls: [{ id: 'task-1', name: 'task', arguments: '{}', status: 'running' }]
+      }
+    ]
+    const steps = ensureStep(source, sub('task-1', 'coder'), 'm2')
+    const call = steps[0].toolCalls[0]
+    expect(call.agentName).toBe('coder')
+    expect(call.agentSteps).toEqual([emptyStep('m2')])
+  })
+
+  it('父级调用还不存在时不凭空补建:子 Agent 的步骤不能混进主上下文', () => {
+    const steps = [emptyStep('m1')]
+    const next = ensureStep(steps, sub('task-404'), 'm2')
+    expect(next).toEqual(steps)
+    expect(next.some((step) => step.messageId === 'm2')).toBe(false)
+  })
+
+  it('重复调用只建一次,原数组也不被修改', () => {
+    const source: AgentStep[] = [emptyStep('m1')]
+    const once = ensureStep(source, root(), 'm2')
+    const twice = ensureStep(once, root(), 'm2')
+    expect(once).toHaveLength(2)
+    expect(twice).toHaveLength(2)
+    expect(source).toHaveLength(1)
+  })
+
+  it('补建之后按 id 定位的增量才落得上:这是打字机恢复的关键', () => {
+    // 模拟真实事件顺序:step_start 丢了,delta 先到
+    const steps = ensureStep([], root(), 'm1')
+    const filled = mapStep(steps, 'm1', (step) => ({ ...step, content: step.content + '你好' }))
+    expect(filled[0].content).toBe('你好')
+    // 没有 ensureStep 的话,这一步会永远丢掉正文
+    expect(mapStep([], 'm1', (step) => ({ ...step, content: '你好' }))).toEqual([])
   })
 })

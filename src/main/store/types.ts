@@ -7,6 +7,21 @@ export interface WindowState {
   isMaximized: boolean
 }
 
+/**
+ * 候选清单里的一行:模型 ID 加上它自己的上下文窗口。
+ * 窗口配成对象字段而不是 Record<模型名, 窗口>:改名和删除时一起走,
+ * 不会留下指向已删模型的悬空键。
+ */
+export interface ModelConfig {
+  name: string
+  /**
+   * 该模型的上下文窗口(token),缺省按 DEFAULT_CONTEXT_WINDOW 算。
+   * 这个值只参与裁剪预算的计算:配大了不会报错,只是要等真实上限撞上才发现
+   * (本地运行时内存不足压小窗口时是静默截断,不返回错误)。
+   */
+  contextWindow?: number
+}
+
 /** 一个模型服务商:独立的接口地址与凭据,下挂自己的模型清单 */
 export interface ModelProvider {
   /** uuid;改名不影响已被引用的地方 */
@@ -19,7 +34,7 @@ export interface ModelProvider {
    * 给选择器用的候选清单,不是白名单:
    * 服务端支持哪些模型由服务端说了算,运行时不再校验。
    */
-  models: string[]
+  models: ModelConfig[]
 }
 
 /** 设置页新建 / 编辑服务商时提交的内容 */
@@ -27,7 +42,16 @@ export interface ModelProviderDraft {
   name: string
   baseUrl: string
   apiKey?: string
-  models: string[]
+  models: ModelConfigDraft[]
+}
+
+/**
+ * 表单里的模型行。清空窗口输入框时 antd 的 InputNumber 给的是 null,
+ * 所以这里比 ModelConfig 宽一档,由提交方收敛成 undefined(= 用默认值)。
+ */
+export interface ModelConfigDraft {
+  name: string
+  contextWindow?: number | null
 }
 
 /** 一次模型调用的选择 */
@@ -50,8 +74,8 @@ export interface AppSettings {
   /** 是否允许主 Agent 派生子 Agent;未设置视为允许 */
   enableSubAgent?: boolean
   /**
-   * 当前模型的上下文窗口大小(token)。
-   * 全局一个值:换模型时得跟着改,否则裁剪会按错的预算算。未设置按 32k 兜底。
+   * @deprecated 上下文窗口已经下放到每个模型(ModelConfig.contextWindow)。
+   * 仅 migrateSettings 会读它并搬进当前选中的模型,新代码一律按模型取。
    */
   contextWindow?: number
   /** 下载私有仓库 skill 时使用;暂无设置 UI */
