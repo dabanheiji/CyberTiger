@@ -8,7 +8,8 @@ import {
   renameConversation,
   removeConversation,
   generateReply,
-  abortReply
+  abortReply,
+  compactContext
 } from '../chat/controller'
 import {
   getStatus as mcpGetStatus,
@@ -32,6 +33,7 @@ export function registerIpc(): void {
   ipcMain.handle('chat:removeConversation', removeConversation)
   ipcMain.handle('chat:generateReply', generateReply)
   ipcMain.handle('chat:abortReply', abortReply)
+  ipcMain.handle('chat:compactContext', compactContext)
 
   ipcMain.handle('mcp:getStatus', mcpGetStatus)
   ipcMain.handle('mcp:saveConfig', mcpSaveConfig)

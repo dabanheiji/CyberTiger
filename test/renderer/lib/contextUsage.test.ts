@@ -1,5 +1,7 @@
 import { emptyStep } from '../../../src/renderer/src/lib/agentSteps'
 import {
+  compactReasonText,
+  compactResultLine,
   contextShare,
   contextUsage,
   latestInputOfMessages,
@@ -8,6 +10,7 @@ import {
 } from '../../../src/renderer/src/lib/contextUsage'
 import { makeMessage } from '../../helpers/fixtures'
 import type { AgentStep } from '../../../src/renderer/src/lib/agentSteps'
+import type { CompactReport } from '../../../src/main/chat/dto'
 import type { ModelConfig, ModelProvider } from '../../../src/main/store/types'
 
 function provider(models: ModelConfig[], id = 'p-1'): ModelProvider {
@@ -169,5 +172,49 @@ describe('contextShare', () => {
   it('没有窗口时返回空串,而不是编一个默认分母', () => {
     expect(contextShare(20_000)).toBe('')
     expect(contextShare(20_000, 0)).toBe('')
+  })
+})
+
+describe('压缩结论的一行说明', () => {
+  const report = (overrides: Partial<CompactReport>): CompactReport => ({
+    compacted: true,
+    window: 100_000,
+    ...overrides
+  })
+
+  it('压成了就报「省下多少 + 压完约多少」', () => {
+    expect(
+      compactResultLine(
+        report({
+          usage: { prompt: 5000, completion: 300, estimated: false },
+          metrics: {
+            prompt: 5000,
+            completion: 300,
+            estimated: false,
+            coveredMessages: 12,
+            coveredTokens: 30_000,
+            at: '2026-10-12T09:00:00Z'
+          },
+          projectedTokens: 40_000
+        })
+      )
+    ).toBe('已压进摘要、省下 30k,压完约 40k')
+  })
+
+  it('三种拒绝原因各有一句解释,界面不用猜', () => {
+    for (const reason of ['below-trigger', 'too-few-units', 'poor-saving'] as const) {
+      expect(compactReasonText(reason)).not.toBe('')
+      expect(compactReasonText(reason)).toContain('压')
+    }
+  })
+
+  it('被计划拒绝时说清原因,而不是回一句「没压」', () => {
+    expect(compactResultLine(report({ compacted: false, reason: 'too-few-units' }))).toContain(
+      '不足 3 组'
+    )
+    // 摘要调用失败带的是面向用户的中文提示
+    expect(compactResultLine(report({ compacted: false, msg: '连接被拒绝' }))).toBe(
+      '压缩失败:连接被拒绝'
+    )
   })
 })

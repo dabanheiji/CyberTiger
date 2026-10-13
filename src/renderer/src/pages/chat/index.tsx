@@ -4,6 +4,7 @@ import { App, theme } from 'antd'
 import type { Conversation, Message } from '../../../../main/chat/sql'
 import type { AppSettings, ModelProvider, ModelRef } from '../../../../main/store/types'
 import { normalizeRef } from '../../../../main/store/modelRef'
+import { compactResultLine } from '../../lib/contextUsage'
 import Sidebar from './Sidebar'
 import ChatPanel from './ChatPanel'
 import { useAgentStream } from '../../hooks/useAgentStream'
@@ -22,6 +23,8 @@ function ChatPage(): React.JSX.Element {
   const [sending, setSending] = useState(false)
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [currentRef, setCurrentRef] = useState<ModelRef | undefined>()
+  // 手动压缩在等 IPC 返回:按钮转圈,同时避免连点起两次压缩
+  const [compacting, setCompacting] = useState(false)
   // 与 activeId 同步的 ref,供异步回调判断返回结果是否仍属于当前会话
   const activeIdRef = useRef<string | null>(null)
 
@@ -179,6 +182,37 @@ function ChatPage(): React.JSX.Element {
     void abortReply()
   }
 
+  /**
+   * 手动压缩当前会话的上下文。
+   *
+   * 压没压都要说一句:被计划拒绝时(可压的太少 / 省不出空间)用户点这颗按钮就是为了
+   * 知道为什么没压,静默返回等于什么都没发生。结论只在这一句提示里说,不占用环。
+   */
+  const handleCompact = async (): Promise<void> => {
+    if (activeId === null || !currentRef || compacting) return
+    setCompacting(true)
+    try {
+      const res = await window.api.chat.compactContext({
+        conversationId: activeId,
+        providerId: currentRef.providerId,
+        model: currentRef.model
+      })
+      if (!res.success) {
+        message.error(res.msg)
+        return
+      }
+      if (res.data.compacted) {
+        message.success(compactResultLine(res.data))
+      } else {
+        message.warning(compactResultLine(res.data))
+      }
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCompacting(false)
+    }
+  }
+
   const handleRename = async (conversationId: string, title: string): Promise<void> => {
     const res = await window.api.chat.renameConversation({ conversationId, title })
     if (!res.success) {
@@ -229,8 +263,10 @@ function ChatPage(): React.JSX.Element {
         sending={sending}
         providers={providers}
         currentRef={currentRef}
+        compacting={compacting}
         onSend={handleSend}
         onCancel={handleCancel}
+        onCompact={() => void handleCompact()}
         onModelChange={handleModelChange}
         onOpenSettings={openSettings}
       />

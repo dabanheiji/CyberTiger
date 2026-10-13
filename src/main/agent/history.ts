@@ -6,6 +6,8 @@ import { replaceArguments } from '../skills/parser'
 import { agentRegistry } from '../agents/registry'
 import { store } from '../store'
 import { SYSTEM_PROMPT } from './prompt'
+import { summaryBlock } from './compact'
+import type { IdentifiedMessage } from './turns'
 
 /**
  * 易变工具的旧结果在回放时替换成这段占位:保留"调用过"的事实,同时让模型无数据可复用。
@@ -85,21 +87,17 @@ export function toChatMessage(m: Message): ChatCompletionMessage | null {
 }
 
 /**
- * 由会话历史构建请求消息列表,前置 system prompt(含 skill 目录)。
- * 历史里易变工具(volatile)的结果一律视为过期并替换为占位,
- * 模型想复用也没有数据可用,只能重新调用。本轮新产生的结果由 loop 直接追加,不经过这里。
- * definitions 是本次 run 的工具快照,用于判断哪个工具是易变的。
+ * 库内消息 → 带 id 的协议消息,顺序与内容都和回放时一致。
+ * 摘要压缩的输入用它,于是「发给模型的」与「送去摘要的」永远是同一份文本 ——
+ * 两边各自转换早晚会分叉,分叉后的水位就落在裁剪不认识的位置上。
  */
-export function buildHistory(
+export function toIdentifiedMessages(
   messages: Message[],
   definitions: ToolDefinition[]
-): ChatCompletionMessage[] {
-  const history: ChatCompletionMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT + skillsCatalog() + agentsCatalog() }
-  ]
+): IdentifiedMessage[] {
   // tool_call_id → 工具名,用于判断 tool 行对应的是哪个工具
   const callTools = new Map<string, string>()
-
+  const items: IdentifiedMessage[] = []
   for (const m of messages) {
     if (m.role === 'assistant') {
       for (const c of m.tool_calls) callTools.set(c.id, c.name)
@@ -109,11 +107,51 @@ export function buildHistory(
     if (converted.role === 'tool') {
       const toolName = callTools.get(m.tool_call_id)
       if (toolName !== undefined && isVolatileTool(toolName, definitions)) {
-        history.push({ ...converted, content: STALE_RESULT_PLACEHOLDER })
+        items.push({ id: m.id, message: { ...converted, content: STALE_RESULT_PLACEHOLDER } })
         continue
       }
     }
-    history.push(converted)
+    items.push({ id: m.id, message: converted })
   }
-  return history
+  return items
+}
+
+/**
+ * 主 Agent 的 system prompt(含 skill 与子 Agent 目录)。
+ * 单独导出是为了让「历史正文」与「这份开头」能由调用方自己拼,而不是多算一遍目录。
+ */
+export function systemPromptMessage(): ChatCompletionMessage {
+  return { role: 'system', content: SYSTEM_PROMPT + skillsCatalog() + agentsCatalog() }
+}
+
+/**
+ * 请求里随历史变化的那段:摘要块 + 历史原文。
+ *
+ * 单独导出是为了让调用方把自己拿到的 id 与这段消息**同源**取用:水位落在具体某条消息的 id 上,
+ * 若内容由另一处转换出来,两次转换一旦分叉(尺寸、跳过空行的规则不同),水位就指到别的行上。
+ */
+export function historyBody(items: IdentifiedMessage[], summary = ''): ChatCompletionMessage[] {
+  const body: ChatCompletionMessage[] = []
+  if (summary.trim()) body.push(summaryBlock(summary))
+  for (const item of items) body.push(item.message)
+  return body
+}
+
+/**
+ * 由会话历史构建请求消息列表:system prompt(含 skill 目录)→ 摘要块 → 历史。
+ * summary 非空时插在**第二位**:它替代的正是水位之前那段历史,排到末尾会被模型当成新提问,
+ * 并进 system 又会让每次压缩都重写整个请求开头、把提示缓存全打掉。
+ * 历史里易变工具(volatile)的结果一律视为过期并替换为占位,
+ * 模型想复用也没有数据可用,只能重新调用。本轮新产生的结果由 loop 直接追加,不经过这里。
+ * definitions 是本次 run 的工具快照,用于判断哪个工具是易变的。
+ */
+export function buildHistory(
+  messages: Message[],
+  definitions: ToolDefinition[],
+  summary = ''
+): ChatCompletionMessage[] {
+  return [
+    systemPromptMessage(),
+    ...historyBody(toIdentifiedMessages(messages, definitions), summary)
+  ]
 }

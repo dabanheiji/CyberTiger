@@ -1,4 +1,5 @@
 import type { Message } from '../../../main/chat/sql'
+import type { CompactReport, CompactRejectReason } from '../../../main/chat/dto'
 import type { ModelProvider, ModelRef } from '../../../main/store/types'
 import { contextWindowOf } from '../../../main/store/modelRef'
 import { budgetFor } from '../../../main/agent/context'
@@ -99,4 +100,30 @@ export function usageLevel(usage: ContextUsage): 'normal' | 'warning' | 'danger'
 export function contextShare(prompt: number, contextWindow?: number): string {
   if (!contextWindow || contextWindow <= 0) return ''
   return `/${formatTokens(contextWindow)}(${Math.round((prompt / contextWindow) * 100)}%)`
+}
+
+/** 计划拒绝压缩的原因 → 给用户看的一句解释 */
+export function compactReasonText(reason: CompactRejectReason): string {
+  switch (reason) {
+    case 'below-trigger':
+      return '还没到触发线,这次没有压'
+    case 'too-few-units':
+      return '能整段交给摘要的历史太少(不足 3 组),压了省不出空间'
+    case 'poor-saving':
+      return '摘要装不下多少内容,压完省不出足够空间'
+  }
+}
+
+/** 一次压缩结论(手动按钮的返回值)→ 一行说明 */
+export function compactResultLine(report: CompactReport): string {
+  if (!report.compacted) {
+    if (report.msg) return `压缩失败:${report.msg}`
+    return report.reason ? compactReasonText(report.reason) : '这次没有压缩'
+  }
+  const saved = report.metrics ? formatTokens(report.metrics.coveredTokens) : ''
+  const projected =
+    typeof report.projectedTokens === 'number'
+      ? `,压完约 ${formatTokens(report.projectedTokens)}`
+      : ''
+  return `已压进摘要${saved ? `、省下 ${saved}` : ''}${projected}`
 }

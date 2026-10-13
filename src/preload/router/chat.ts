@@ -5,7 +5,9 @@ import type {
   sendMessageDto,
   renameConversationDto,
   generateReplyDto,
+  compactDto,
   ChatStreamEvent,
+  CompactReport,
   IpcResult
 } from '../../main/chat/dto'
 
@@ -27,6 +29,12 @@ export default {
     ipcRenderer.invoke('chat:generateReply', dto),
   abortReply: (runId: string): Promise<IpcResult<null>> =>
     ipcRenderer.invoke('chat:abortReply', runId),
+  /**
+   * 手动压缩一次会话的上下文。
+   * 这是个长耗时调用(压缩自己就是几次模型调用),返回值到手即表示水位已更新。
+   */
+  compactContext: (dto: compactDto): Promise<IpcResult<CompactReport>> =>
+    ipcRenderer.invoke('chat:compactContext', dto),
   /** 订阅流式事件,返回取消订阅函数 */
   onStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)

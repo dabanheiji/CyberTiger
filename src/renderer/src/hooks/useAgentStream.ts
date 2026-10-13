@@ -104,6 +104,10 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
           })
           return
         }
+        case 'compact':
+          // 中途压缩换掉的是历史前缀,不改各步内容,界面也不显示它(账目在会话行上)。
+          // 这条 case 不能省:落到 switch 末尾会把正在流式的整轮状态清空。
+          return
         case 'done':
           await optionsRef.current.onDone(event.scope.conversationId, event.aborted)
           break

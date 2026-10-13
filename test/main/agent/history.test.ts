@@ -4,8 +4,10 @@ import {
   STALE_RESULT_PLACEHOLDER,
   buildHistory,
   skillsCatalog,
-  toChatMessage
+  toChatMessage,
+  toIdentifiedMessages
 } from '../../../src/main/agent/history'
+import { SUMMARY_BLOCK_PREFIX, isSummaryBlock, summaryBlock } from '../../../src/main/agent/compact'
 import { SYSTEM_PROMPT } from '../../../src/main/agent/prompt'
 import { skillRegistry } from '../../../src/main/skills/registry'
 import { agentRegistry } from '../../../src/main/agents/registry'
@@ -323,5 +325,78 @@ describe('/ 触发的 skill 展开', () => {
       []
     )
     expect(history.at(-1)?.content).toContain('[Skill: route-planner]')
+  })
+})
+
+describe('摘要块作为固定头部', () => {
+  const oneTurn = (): ReturnType<typeof makeMessage>[] => [
+    makeMessage({ role: 'user', content: '继续刚才的事' })
+  ]
+
+  it('有摘要时它排在 system 之后、历史之前', () => {
+    const history = buildHistory(oneTurn(), [], '用户此前在查中牟到汝阳的路线')
+    expect(history.map((m) => m.role)).toEqual(['system', 'user', 'user'])
+    expect(String(history[1].content)).toContain(SUMMARY_BLOCK_PREFIX)
+    expect(String(history[1].content)).toContain('用户此前在查中牟到汝阳的路线')
+    expect(String(history[2].content)).toBe('继续刚才的事')
+  })
+
+  it('摘要为空或只有空白时不插空块:一条没有内容的 user 消息会被模型当成新提问', () => {
+    expect(buildHistory(oneTurn(), [], '').map((m) => m.role)).toEqual(['system', 'user'])
+    expect(buildHistory(oneTurn(), [], '   \n ').map((m) => m.role)).toEqual(['system', 'user'])
+  })
+
+  it('位置只认「紧跟 system 的那一条」:排到历史后面或换成 assistant 都不算', () => {
+    expect(isSummaryBlock(summaryBlock('正文'))).toBe(true)
+    expect(isSummaryBlock(undefined)).toBe(false)
+    expect(isSummaryBlock({ role: 'user', content: '普通提问' })).toBe(false)
+    expect(isSummaryBlock({ role: 'assistant', content: SUMMARY_BLOCK_PREFIX })).toBe(false)
+  })
+
+  it('标记行只陈述,不带「请回应 / 重新调用」这类祈使', () => {
+    // 这块以 user 角色出现在请求里,形似一条新提问;写成祈使句模型就会去执行它
+    expect(SUMMARY_BLOCK_PREFIX).not.toMatch(/请|需要|应当|必须|重新/)
+  })
+})
+
+describe('toIdentifiedMessages 给摘要用', () => {
+  it('每条转换结果带着自己那行的 id:水位才有落点', () => {
+    const items = toIdentifiedMessages(
+      [
+        makeMessage({ id: 'm1', role: 'user', content: '问' }),
+        makeMessage({ id: 'm2', role: 'assistant', content: '答' })
+      ],
+      []
+    )
+    expect(items.map((i) => i.id)).toEqual(['m1', 'm2'])
+  })
+
+  it('全空的占位行不产出条目,id 也不会因此留个空洞', () => {
+    const items = toIdentifiedMessages(
+      [
+        makeMessage({ id: 'm1', role: 'user', content: '问' }),
+        makeMessage({ id: 'm2', role: 'assistant', content: '', reasoning: '只想了一半' }),
+        makeMessage({ id: 'm3', role: 'assistant', content: '答' })
+      ],
+      []
+    )
+    expect(items.map((i) => i.id)).toEqual(['m1', 'm3'])
+  })
+
+  it('与 buildHistory 转出同一份内容:回放与摘要永不分叉', () => {
+    const messages = [
+      makeMessage({ id: 'm1', role: 'user', content: '现在几点' }),
+      makeMessage({
+        id: 'm2',
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'c1', name: 'get_current_time', arguments: '{}' }]
+      }),
+      makeMessage({ id: 'm3', role: 'tool', tool_call_id: 'c1', content: '12:00' })
+    ]
+    const defs = [toolDef('get_current_time', true)]
+    expect(toIdentifiedMessages(messages, defs).map((i) => i.message)).toEqual(
+      buildHistory(messages, defs).slice(1)
+    )
   })
 })

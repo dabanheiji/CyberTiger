@@ -6,7 +6,8 @@ import {
   findProvider,
   findProviderByName,
   listProviders,
-  resolveConnection
+  resolveConnection,
+  type ResolvedConnection
 } from '../store/providers'
 import { normalizeRef } from '../store/modelRef'
 import type { ModelRef } from '../store/types'
@@ -15,13 +16,36 @@ import type {
   createFirstMessageDto,
   sendMessageDto,
   generateReplyDto,
+  compactDto,
   ChatStreamEvent,
+  CompactReport,
   RunScope,
+  SummaryMetrics,
   ToolCallRecord
 } from './dto'
-import { runAgent, MAIN_AGENT_MAX_STEPS, type AgentStore } from '../agent/loop'
+import {
+  runAgent,
+  MAIN_AGENT_MAX_STEPS,
+  type AgentStore,
+  type RunCompactResult,
+  type RunCompactor
+} from '../agent/loop'
 import { budgetFor } from '../agent/context'
-import { buildHistory, skillsCatalog } from '../agent/history'
+import {
+  DEFAULT_COMPACT_POLICY,
+  compactConversation,
+  planCompaction,
+  toCompactUnits,
+  type CompactSizing,
+  type CompactUnit
+} from '../agent/compact'
+import {
+  buildHistory,
+  historyBody,
+  skillsCatalog,
+  systemPromptMessage,
+  toIdentifiedMessages
+} from '../agent/history'
 import {
   createTaskTool,
   TASK_TOOL_NAME,
@@ -33,6 +57,7 @@ import {
 import { agentRegistry } from '../agents/registry'
 import { GENERIC_AGENT } from '../agents/builtin'
 import { loadSkillTool } from '../skills/tools'
+import { estimateRequestTokens, estimateTextTokens } from '../tokens/estimate'
 import {
   createToolRunner,
   getAllTools,
@@ -106,6 +131,289 @@ export function listTopLevelMessages(conversationId: string): Message[] {
     .prepare<[string], MessageRow>(chatSql.messages.listTopLevel)
     .all(conversationId)
     .map(rowToMessage)
+}
+
+/** 一个会话的摘要状态;`summaryUntil` 为空串表示还没压过,历史仍全量回放 */
+export interface SummaryState {
+  summary: string
+  summaryUntil: string
+  metrics: SummaryMetrics | undefined
+}
+
+interface SummaryStateRow {
+  summary: string
+  summary_until: string
+  summary_usage: string
+}
+
+/**
+ * 解析 `summary_usage` 列。
+ * 账目只用于界面解释「上次压了什么、省了多少」,所以字段缺成什么样都不值得报错 ——
+ * 形状不对或 JSON 损坏一律当作没有,让占用环退回只显示当前用量。
+ */
+export function parseSummaryMetrics(raw: string): SummaryMetrics | undefined {
+  if (!raw) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const m = parsed as Partial<SummaryMetrics>
+  if (typeof m.prompt !== 'number' || typeof m.completion !== 'number') return undefined
+  return {
+    prompt: m.prompt,
+    completion: m.completion,
+    estimated: m.estimated === true,
+    coveredMessages: typeof m.coveredMessages === 'number' ? m.coveredMessages : 0,
+    coveredTokens: typeof m.coveredTokens === 'number' ? m.coveredTokens : 0,
+    at: typeof m.at === 'string' ? m.at : ''
+  }
+}
+
+/** 读摘要三列;会话不存在时给出「没有摘要」的空形状,而不是抛错 */
+export function getSummaryState(conversationId: string): SummaryState {
+  const row = getDb()
+    .prepare<[string], SummaryStateRow>(chatSql.conversations.summaryState)
+    .get(conversationId)
+  return {
+    summary: row?.summary ?? '',
+    summaryUntil: row?.summary_until ?? '',
+    metrics: parseSummaryMetrics(row?.summary_usage ?? '')
+  }
+}
+
+/**
+ * 水位之后的顶层行:压缩后发给模型的那段历史(不含子 agent 的嵌套行)。
+ * 没有水位时这条 SQL 退化成全量顶层行,所以调用方不需要分支。
+ */
+export function listMessagesAfterWatermark(conversationId: string): Message[] {
+  const { summaryUntil } = getSummaryState(conversationId)
+  return getDb()
+    .prepare<[string, string], MessageRow>(chatSql.messages.listTopLevelAfter)
+    .all(conversationId, summaryUntil)
+    .map(rowToMessage)
+}
+
+/**
+ * 记下一次压缩的结果。
+ * 只有摘要真正产出并写进请求时才调用;失败或被中止的压缩保持原水位,
+ * 下一次请求照旧回放全部历史 —— 宁可超限也不悄悄丢内容。
+ */
+export function commitSummary(
+  conversationId: string,
+  summary: string,
+  untilMessageId: string,
+  metrics: SummaryMetrics
+): Database.RunResult {
+  return getDb()
+    .prepare(chatSql.conversations.setSummary)
+    .run(summary, untilMessageId, JSON.stringify(metrics), conversationId)
+}
+
+/** 压缩一组单元所需的模型调用参数 */
+interface CompactTarget {
+  baseUrl: string
+  apiKey?: string
+  model: string
+  signal: AbortSignal
+}
+
+/**
+ * `compactUnits` 的结果:面向界面的报告,外加 run 中途续跑要用的两样东西。
+ *
+ * 摘要正文与「覆盖了几个单元」只有 loop 需要(它得就地换掉固定头部、切掉前缀);
+ * 走 IPC 的那条路径会把它们摘掉 —— 摘要已经在库里,再发给渲染层只是白占一次序列化。
+ */
+type UnitCompactResult = CompactReport & RunCompactResult
+
+/** 摘掉 loop 专用的内部字段,得到可以直接过 IPC 的报告 */
+function toReport({ summary, coveredUnits, ...rest }: UnitCompactResult): CompactReport {
+  void summary
+  void coveredUnits
+  return rest
+}
+
+/**
+ * 把「水位之后的单元」压一次:选边界 → 分段摘要 → 写摘要与水位。
+ *
+ * 边界与摘要都由 agent/compact.ts 决定,这里只做编排:
+ *   - 计划拒绝(含手动压缩时的收益不足)不调模型,直接返回原因;
+ *   - 摘要失败或中止**不写水位**,历史原样留着 —— 用半截摘要冒充完整摘要比超窗更难排查。
+ * running 的 run 与手动按钮可能同时想压同一个会话,互斥由调用方持有的 Set 保证。
+ */
+async function compactUnits(
+  target: CompactTarget,
+  conversationId: string,
+  units: CompactUnit[],
+  sizing: CompactSizing,
+  options: { force: boolean; summary: string; stateNote?: string }
+): Promise<UnitCompactResult> {
+  const decision = planCompaction(units, sizing, DEFAULT_COMPACT_POLICY, options.force)
+  if (!decision.should) {
+    return { compacted: false, reason: decision.reason, window: sizing.window }
+  }
+
+  const outcome = await compactConversation({
+    baseUrl: target.baseUrl,
+    apiKey: target.apiKey,
+    model: target.model,
+    signal: target.signal,
+    previousSummary: options.summary,
+    plan: decision.plan,
+    ...(options.stateNote ? { stateNote: options.stateNote } : {})
+  })
+
+  if (!outcome.ok) {
+    return {
+      compacted: false,
+      ...(outcome.msg ? { msg: outcome.msg } : {}),
+      usage: outcome.usage,
+      window: sizing.window
+    }
+  }
+
+  const metrics = outcome.metrics as SummaryMetrics
+  commitSummary(conversationId, outcome.summary, outcome.untilMessageId, metrics)
+  return {
+    compacted: true,
+    summary: outcome.summary,
+    coveredUnits: decision.plan.covered.length,
+    usage: outcome.usage,
+    metrics,
+    projectedTokens: decision.plan.projectedTokens,
+    window: sizing.window
+  }
+}
+
+/**
+ * 压缩判断所需的规模:固定开销 + 当前摘要 + 模型配置的窗口。
+ * 固定开销的口径必须与 planContext 一致(同一份 system prompt 与工具定义),所以现取而不另算 ——
+ * 两处一旦分叉,触发线就算歪,要么早压要么压不动。
+ */
+function fixedSizing(
+  definitions: ToolDefinition[],
+  contextWindow: number | undefined,
+  summary: string
+): CompactSizing {
+  const tools = createToolRunner(definitions).toChatCompletionTools()
+  return {
+    fixedTokens: estimateRequestTokens(buildHistory([], definitions), tools),
+    summaryTokens: estimateTextTokens(summary),
+    // 压缩的比例全部相对「模型配置的窗口」,不是相对裁剪后的额度
+    window: budgetFor(contextWindow).window
+  }
+}
+
+/** 正在压缩中的会话:同一会话同时只允许一次压缩 */
+const compacting = new Set<string>()
+
+/** 该会话是否有进行中的 run 或压缩;手动压缩只在两皆无时才允许 */
+function hasActiveWork(conversationId: string): boolean {
+  if (compacting.has(conversationId)) return true
+  for (const run of activeRuns.values()) {
+    if (run.conversationId === conversationId) return true
+  }
+  return false
+}
+
+/**
+ * 对「水位之后的全部顶层行」压一次。
+ * 请求前的自动压缩与手动压缩共用它,两者只在 force 上不同。
+ */
+async function compactBeforeRun(
+  target: CompactTarget,
+  conversationId: string,
+  definitions: ToolDefinition[],
+  options: { force: boolean; summary: string; contextWindow?: number }
+): Promise<UnitCompactResult> {
+  const messages = listMessagesAfterWatermark(conversationId)
+  const units = toCompactUnits(toIdentifiedMessages(messages, definitions))
+  return compactUnits(
+    target,
+    conversationId,
+    units,
+    fixedSizing(definitions, options.contextWindow, options.summary),
+    { force: options.force, summary: options.summary }
+  )
+}
+
+/**
+ * run 中途的压缩:loop 每一步之后问一次「该压了吗」。
+ *
+ * 与请求前的压缩走同一个 `compactUnits`,差别只在两件事:
+ *   - 单元与规模由 loop 现算 —— 它手里就是下一步要发出去的那份上下文,包含本轮自己攒的
+ *     工具结果,这部分请求前的压缩看不见;
+ *   - 必须带执行状态便签(`note`):摘要要写下「已经做过什么、还剩几步」,否则压完续跑会把
+ *     做过的工具再调一遍。
+ * 没越过触发线时计划直接拒绝,不发模型调用,loop 拿到 compacted=false 就原样继续。
+ * 子 Agent 不传这个注入点:它的上下文就是自己那份任务,压掉的过程它自己还要用。
+ */
+function createRunCompactor(
+  conversationId: string,
+  connection: ResolvedConnection,
+  signal: AbortSignal
+): RunCompactor {
+  return async ({ units, sizing, summary, note }) => {
+    const result = await compactUnits(
+      { baseUrl: connection.baseUrl, apiKey: connection.apiKey, model: connection.model, signal },
+      conversationId,
+      units,
+      sizing,
+      { force: false, summary, stateNote: note }
+    )
+    return {
+      compacted: result.compacted,
+      ...(result.summary === undefined ? {} : { summary: result.summary }),
+      ...(result.coveredUnits === undefined ? {} : { coveredUnits: result.coveredUnits }),
+      ...(result.usage === undefined ? {} : { usage: result.usage }),
+      ...(result.metrics === undefined ? {} : { metrics: result.metrics }),
+      ...(result.msg === undefined ? {} : { msg: result.msg })
+    }
+  }
+}
+
+/**
+ * 手动压缩一次会话的上下文(上下文占用环上的按钮走这条路径)。
+ *
+ * 与请求前的自动压缩只差一个 force:用户已经决定要压,触发线不再拦。
+ * 单元数与收益不足照样拒 —— 那种情况下按了也省不出空间,得让用户看到原因。
+ * 不能与正在跑的 run 并存:两边都在推进同一个水位,会互相踩出错误的边界。
+ */
+export async function compactConversationManually(dto: compactDto): Promise<CompactReport> {
+  const ref: ModelRef | undefined = dto.providerId
+    ? { providerId: dto.providerId, model: dto.model }
+    : normalizeRef(store.get('currentModel'), listProviders())
+  if (!ref) throw new Error('请先在设置中配置模型服务商')
+  const connection = resolveConnection(ref)
+  if (hasActiveWork(dto.conversationId)) {
+    throw new Error('这一轮还在进行中,请等它结束或先点击停止')
+  }
+
+  // 登记进 activeRuns:应用退出或删除会话时,这条摘要调用同样会被中止
+  const controller = new AbortController()
+  const runId = uuidv4()
+  activeRuns.set(runId, { conversationId: dto.conversationId, controller })
+  compacting.add(dto.conversationId)
+  try {
+    const { summary } = getSummaryState(dto.conversationId)
+    const result = await compactBeforeRun(
+      {
+        baseUrl: connection.baseUrl,
+        apiKey: connection.apiKey,
+        model: connection.model,
+        signal: controller.signal
+      },
+      dto.conversationId,
+      getAllTools(),
+      { force: true, summary, contextWindow: connection.contextWindow }
+    )
+    return toReport(result)
+  } finally {
+    compacting.delete(dto.conversationId)
+    activeRuns.delete(runId)
+  }
 }
 
 export function createMessage(
@@ -325,7 +633,8 @@ export function generateReply(
     ? { providerId: dto.providerId, model: dto.model }
     : normalizeRef(store.get('currentModel'), listProviders())
   if (!ref) throw new Error('请先在设置中配置模型服务商')
-  const { baseUrl, apiKey, model, contextWindow } = resolveConnection(ref)
+  // 连接在 run 开始前解析一次并随参数带走:过程中改设置不影响这一轮
+  const connection = resolveConnection(ref)
 
   const messages = listTopLevelMessages(dto.conversationId)
   if (!messages.some((m) => m.role === 'user')) throw new Error('会话不存在或没有可发送的消息')
@@ -334,19 +643,58 @@ export function generateReply(
   const controller = new AbortController()
   activeRuns.set(runId, { conversationId: dto.conversationId, controller })
 
+  void startRun({
+    conversationId: dto.conversationId,
+    scope: {
+      conversationId: dto.conversationId,
+      runId,
+      agent: '',
+      parentCallId: '',
+      depth: 0
+    },
+    ref,
+    connection,
+    signal: controller.signal,
+    emit
+  }).finally(() => {
+    activeRuns.delete(runId)
+  })
+
+  return runId
+}
+
+interface StartRunInput {
+  conversationId: string
+  scope: RunScope
+  ref: ModelRef
+  connection: ResolvedConnection
+  signal: AbortSignal
+  emit: (event: ChatStreamEvent) => void
+}
+
+/**
+ * 压缩检查 → 组装历史 → 跑 run。
+ *
+ * 这一段是异步的,而 `generateReply` 必须同步返回 runId(渲染层先拿到句柄才能订阅事件),
+ * 所以拆开。放在 run 之前是因为压缩自己就是一次模型调用:本轮就该受益于新摘要,
+ * 而不是「这轮还带着全部历史、下轮才用上摘要」。
+ */
+async function startRun(input: StartRunInput): Promise<void> {
+  const { conversationId, scope, connection, signal, emit } = input
+  const { baseUrl, apiKey, model, contextWindow } = connection
   // 工具快照在 run 开始时固定,保证本次 run 的执行范围与发给模型的列表严格一致
   const definitions = getAllTools()
-  const tools = [...definitions]
 
+  const tools = [...definitions]
   // 允许派生子 Agent 时,给主 agent 挂上 task 工具(子 agent 自己拿不到它)
   if (store.get('enableSubAgent') !== false) {
     tools.push(
       createTaskTool(
         createSubAgentSpawner({
-          conversationId: dto.conversationId,
-          runId,
-          parentRef: ref,
-          signal: controller.signal,
+          conversationId,
+          runId: scope.runId,
+          parentRef: input.ref,
+          signal,
           parentTools: definitions,
           emit
         }),
@@ -356,30 +704,55 @@ export function generateReply(
     )
   }
 
-  void runAgent({
-    scope: {
-      conversationId: dto.conversationId,
-      runId,
-      agent: '',
-      parentCallId: '',
-      depth: 0
-    },
+  // 请求前自动压缩:没过触发线什么也不做;摘要调用失败也不阻断本轮 ——
+  // 带着全部历史继续跑,由 planContext 的硬上限兜底,总比直接拒绝对话好。
+  const { summary } = getSummaryState(conversationId)
+  const report = await compactBeforeRun({ baseUrl, apiKey, model, signal }, conversationId, tools, {
+    force: false,
+    summary,
+    contextWindow
+  })
+  // 只有真调过模型才发事件:被计划拒绝时没有任何账目可展示
+  if (report.usage) {
+    emit({
+      type: 'compact',
+      scope,
+      // 请求前的压缩不属于任何一步,界面把它作为本轮的说明展示
+      messageId: '',
+      ok: report.compacted,
+      usage: report.usage,
+      ...(report.metrics ? { metrics: report.metrics } : {}),
+      ...(report.msg ? { msg: report.msg } : {})
+    })
+  }
+
+  // 摘要 + 水位之后的原文:压缩生效后这才是发给模型的历史
+  const messages = listMessagesAfterWatermark(conversationId)
+  // id 与消息取自同一次转换:loop 中途压缩要把水位落在 id 上,两者必须一一对齐
+  const items = toIdentifiedMessages(messages, tools)
+  const current = getSummaryState(conversationId).summary
+  const history = [systemPromptMessage(), ...historyBody(items, current)]
+
+  await runAgent({
+    scope,
     baseUrl,
     apiKey,
     model,
-    signal: controller.signal,
-    history: buildHistory(messages, definitions),
+    signal,
+    history,
     runner: createToolRunner(tools),
     maxSteps: MAIN_AGENT_MAX_STEPS,
     // 窗口跟着本次解析出的连接走:换服务商 / 换模型都自动跟着变,不再依赖一个全局值
     budget: budgetFor(contextWindow),
     store: agentStore,
-    emit
-  }).finally(() => {
-    activeRuns.delete(runId)
+    emit,
+    // 长工具链会把本轮的工具结果一路堆过触发线,请求前的压缩看不见这部分
+    compaction: {
+      summary: current,
+      historyIds: items.map((item) => item.id),
+      run: createRunCompactor(conversationId, connection, signal)
+    }
   })
-
-  return runId
 }
 
 /** 中止指定 run */

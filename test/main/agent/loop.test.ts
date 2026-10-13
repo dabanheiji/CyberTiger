@@ -1,5 +1,13 @@
-import { MAIN_AGENT_MAX_STEPS, runAgent, type RunAgentParams } from '../../../src/main/agent/loop'
+import {
+  MAIN_AGENT_MAX_STEPS,
+  runAgent,
+  type RunAgentParams,
+  type RunCompactRequest,
+  type RunCompactResult,
+  type RunCompactor
+} from '../../../src/main/agent/loop'
 import { STEP_LIMIT_PROMPT } from '../../../src/main/agent/prompt'
+import { SUMMARY_BLOCK_PREFIX, isSummaryBlock, summaryBlock } from '../../../src/main/agent/compact'
 import type { ContextBudget } from '../../../src/main/agent/context'
 import { estimateRequestTokens } from '../../../src/main/tokens/estimate'
 import type { ChatCompletionMessage } from '../../../src/main/chat/llm'
@@ -28,6 +36,8 @@ interface RunOptions {
   stream?: RunAgentParams['stream']
   /** 上下文预算;不给则用 loop 的默认值(32k 兜底窗口) */
   budget?: ContextBudget
+  /** run 中途压缩的注入点;不传即子 Agent 那种「不压缩」的 run */
+  compaction?: RunAgentParams['compaction']
 }
 
 interface RunOutcome {
@@ -52,6 +62,7 @@ async function run(options: RunOptions = {}): Promise<RunOutcome> {
     store,
     emit,
     ...(options.budget ? { budget: options.budget } : {}),
+    ...(options.compaction ? { compaction: options.compaction } : {}),
     stream: options.stream ?? model.stream
   })
   return { result, requests: model.requests, store, events: collected.events }
@@ -409,7 +420,7 @@ describe('中止', () => {
     expect(events.some((e) => e.type === 'error')).toBe(false)
   })
 
-  it('工具执行到一半中止会留下没有响应的 tool_calls(已知缺陷)', async () => {
+  it('工具执行到一半中止时,没跑的调用补占位 tool 行,不留孤儿', async () => {
     const controller = new AbortController()
     const probe = makeTool(() => {
       controller.abort()
@@ -417,15 +428,34 @@ describe('中止', () => {
     })
     const first = makeCall('probe', '{"i":1}', 'a1')
     const second = makeCall('probe', '{"i":2}', 'a2')
-    const { store } = await run({
+    const { store, events } = await run({
       signal: controller.signal,
       script: [{ toolCalls: [first, second] }, { content: '不该走到这里' }],
       tools: { probe }
     })
     const step = [...store.steps.values()][0]
     expect(step.calls.map((c) => c.id)).toEqual([first.id, second.id])
-    // assistant 行带两个调用,但只有第一个有 tool 行 → 下一轮回放会违反 OpenAI 协议
-    expect(store.toolRows.map((r) => r.toolCallId)).toEqual([first.id])
+    // assistant 行带两个调用,两个都得有 tool 行:第二个是占位结论。
+    // 少了这一行,下一轮回放就是「有调用无响应」,严格端点直接 400。
+    expect(store.toolRows.map((r) => r.toolCallId)).toEqual([first.id, second.id])
+    expect(store.toolRows[1].content).toBe('[本轮未执行,无结果]')
+    // 界面也要收到收尾,否则那次调用永远显示成"进行中"
+    const settled = events.find((e) => e.type === 'tool_result' && e.callId === second.id)
+    expect(settled).toMatchObject({ ok: false })
+  })
+
+  it('收尾步模型仍返回调用时,同样补齐 tool 行', async () => {
+    const probe = makeTool('真实结果')
+    const orphan = makeCall('probe', '{"i":9}', 'z9')
+    const { store } = await run({
+      maxSteps: 1,
+      script: [{ toolCalls: [makeCall('probe', '{"i":1}', 'a1')] }, { toolCalls: [orphan] }],
+      tools: { probe }
+    })
+    // 第一次真实执行 + 收尾步那次调用补的占位行
+    expect(store.toolRows.map((r) => r.toolCallId)).toEqual(['a1', 'z9'])
+    expect(store.toolRows[1].content).toBe('[本轮未执行,无结果]')
+    expect(probe.executed.length).toBe(1)
   })
 })
 
@@ -572,5 +602,240 @@ describe('上下文裁剪接入循环', () => {
     const third = requests[1].messages
     expect(third.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)).toEqual(['d1'])
     expect(requests[2].messages.filter((m) => m.role === 'tool')).toHaveLength(2)
+  })
+})
+
+describe('摘要块在循环里固定成头部', () => {
+  /** 压缩生效后的历史形态:system → 摘要 → 水位之后的原文 */
+  const summarized = (): ChatCompletionMessage[] => [
+    { role: 'system', content: '提示词' },
+    summaryBlock('## 会话目标\n用户此前在查中牟到汝阳的路线'),
+    { role: 'user', content: '继续' }
+  ]
+
+  /** 请求里出现的摘要块条数 */
+  function summaryCount(messages: ChatCompletionMessage[]): number {
+    return messages.filter((m) => isSummaryBlock(m)).length
+  }
+
+  it('每一步都带着它,位置固定在 system 之后:不会被逐步挪走', async () => {
+    const probe = makeTool('结果')
+    const { requests } = await run({
+      history: summarized(),
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'e1')] },
+        { toolCalls: [makeCall('probe', '{"i":2}', 'e2')] },
+        { content: '结束' }
+      ],
+      tools: { probe }
+    })
+    expect(requests).toHaveLength(3)
+    for (const request of requests) {
+      expect(request.messages[0].role).toBe('system')
+      expect(String(request.messages[1].content)).toContain('中牟到汝阳的路线')
+      expect(summaryCount(request.messages)).toBe(1)
+    }
+  })
+
+  it('预算小到必须丢历史时摘要仍然在:它就是前情本身,丢不得', async () => {
+    const probe = makeTool('很长的工具结果'.repeat(60))
+    const { requests } = await run({
+      budget: { window: 4_000, input: 400 },
+      history: summarized(),
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'f1')] },
+        { toolCalls: [makeCall('probe', '{"i":2}', 'f2')] },
+        { content: '结束' }
+      ],
+      tools: { probe }
+    })
+    for (const request of requests) {
+      expect(summaryCount(request.messages)).toBe(1)
+      expect(request.messages[1].role).toBe('user')
+    }
+    // 裁剪确实动了手(否则上面两条断言毫无意义):本轮较早的步骤被弃掉,摘要一动不动
+    expect(
+      requests[2].messages.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)
+    ).toEqual(['f2'])
+  })
+
+  it('摘要不算「本轮请求」:锚定引用的是水位之后那条真实提问', async () => {
+    const probe = makeTool('结果')
+    const { requests } = await run({
+      history: summarized(),
+      script: [{ toolCalls: [makeCall('probe', '{"i":1}', 'g1')] }, { content: '结束' }],
+      tools: { probe }
+    })
+    const anchor = lastContentOf(requests[1].messages)
+    expect(anchor).toMatch(/^\[系统提醒\]/)
+    expect(anchor).toContain('「继续」')
+    // 摘要也是 user 角色;把它当成请求来锚定,模型就会转头去续那件早已做完的事
+    expect(anchor).not.toContain(SUMMARY_BLOCK_PREFIX)
+  })
+})
+
+describe('run 中途压缩', () => {
+  /** 压缩生效前的历史形态:system + 水位之后的那几条原文 */
+  const withHistory = (): ChatCompletionMessage[] => [
+    { role: 'system', content: '提示词' },
+    { role: 'user', content: '查中牟到汝阳的路线' }
+  ]
+
+  /** 假的压缩注入点:记下每次收到的请求,按脚本给出结论;脚本用完即「计划拒绝」 */
+  function fakeCompactor(results: RunCompactResult[]): {
+    calls: RunCompactRequest[]
+    run: RunCompactor
+  } {
+    const calls: RunCompactRequest[] = []
+    return {
+      calls,
+      run: async (request) => {
+        calls.push(request)
+        return calls.length > results.length ? { compacted: false } : results[calls.length - 1]
+      }
+    }
+  }
+
+  /** 那条真实提问(不是摘要、不是锚定)是否还在请求里 */
+  function asksOriginal(messages: ChatCompletionMessage[]): boolean {
+    return messages.some(
+      (m) => m.role === 'user' && !isSummaryBlock(m) && m.content === '查中牟到汝阳的路线'
+    )
+  }
+
+  it('压完的下一步只带新摘要和没被覆盖的后缀:被压掉的原文不再发', async () => {
+    const probe = makeTool('结果')
+    const fake = fakeCompactor([{ compacted: true, summary: '已查明两条路线', coveredUnits: 1 }])
+    const { requests } = await run({
+      history: withHistory(),
+      script: [{ toolCalls: [makeCall('probe', '{"i":1}', 'i1')] }, { content: '结束' }],
+      tools: { probe },
+      compaction: { summary: '', historyIds: ['m1'], run: fake.run }
+    })
+
+    const second = requests[1].messages
+    expect(second[0].role).toBe('system')
+    // 摘要是头部:替换旧的那份,位置钉在 system 之后
+    expect(isSummaryBlock(second[1])).toBe(true)
+    expect(String(second[1].content)).toContain('已查明两条路线')
+    // system → 摘要 → 本轮的 assistant/tool → 锚定:那条提问换成了摘要
+    expect(second.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'user'])
+    expect(asksOriginal(second)).toBe(false)
+    // 本轮自己攒下的步骤必须留在摘要之后:续跑全靠它,裁掉就等于失忆
+    expect(second[3].role).toBe('tool')
+    expectNoOrphanCalls(second)
+  })
+
+  it('压缩请求带的是本轮的单元切分,边界落在已落库的行 id 上', async () => {
+    const probe = makeTool('结果')
+    const fake = fakeCompactor([{ compacted: false }])
+    const { requests, events } = await run({
+      history: withHistory(),
+      script: [{ toolCalls: [makeCall('probe', '{"i":1}', 'j1')] }, { content: '结束' }],
+      tools: { probe },
+      compaction: { summary: '', historyIds: ['m1'], run: fake.run }
+    })
+
+    expect(fake.calls).toHaveLength(1)
+    const request = fake.calls[0]
+    expect(request.step).toBe(1)
+    expect(request.request).toBe('查中牟到汝阳的路线')
+    // 历史那条自成一个单元(带库内 id);本轮的 assistant 与它的 tool 结果同进一个单元
+    expect(request.units.map((u) => u.lastId)).toEqual(['m1', 'tool-2'])
+    expect(request.units.map((u) => u.messages.length)).toEqual([1, 2])
+    expect(request.sizing.window).toBe(131072)
+    // 还没压过:头部为空,摘要不占额度
+    expect(request.sizing.summaryTokens).toBe(0)
+    expect(request.sizing.fixedTokens).toBeGreaterThan(0)
+    // 计划拒绝时没有模型调用、没有账目,也就没有事件可展示
+    expect(events.some((e) => e.type === 'compact')).toBe(false)
+    expect(asksOriginal(requests[1].messages)).toBe(true)
+  })
+
+  it('便签写明「本轮目标、进度、已执行的工具与结论」:续跑不重做已做过的事', async () => {
+    const probe = makeTool('{"iso":"2026-10-12T09:00:00Z"}')
+    const fake = fakeCompactor([{ compacted: false }])
+    await run({
+      history: withHistory(),
+      script: [{ toolCalls: [makeCall('probe', '{"from":"中牟"}', 'k1')] }, { content: '结束' }],
+      tools: { probe },
+      compaction: { summary: '', historyIds: ['m1'], run: fake.run }
+    })
+
+    const note = fake.calls[0].note
+    expect(note).toContain('- 本轮目标:查中牟到汝阳的路线')
+    expect(note).toContain('第 1 步,最多 10 步')
+    // 结论原文进便签:摘要里写下它,压完就不会再调一次同一个工具
+    expect(note).toContain('probe({"from":"中牟"}) → 成功:{"iso":"2026-10-12T09:00:00Z"}')
+  })
+
+  it('第二次压缩拿到上一份摘要:替换语义下前情靠它合并', async () => {
+    const probe = makeTool('结果')
+    const fake = fakeCompactor([
+      { compacted: true, summary: '第一段摘要', coveredUnits: 1 },
+      { compacted: true, summary: '第一段摘要 + 此后的进展', coveredUnits: 1 }
+    ])
+    const { requests } = await run({
+      history: withHistory(),
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'n1')] },
+        { toolCalls: [makeCall('probe', '{"i":2}', 'n2')] },
+        { content: '结束' }
+      ],
+      tools: { probe },
+      compaction: { summary: '', historyIds: ['m1'], run: fake.run }
+    })
+
+    expect(fake.calls).toHaveLength(2)
+    expect(fake.calls[1].summary).toBe('第一段摘要')
+    expect(fake.calls[1].sizing.summaryTokens).toBeGreaterThan(0)
+    for (const request of requests) {
+      // 换掉而不是叠加:任何一步的请求里最多只有一条摘要块
+      expect(request.messages.filter((m) => isSummaryBlock(m)).length).toBeLessThanOrEqual(1)
+    }
+    const third = requests[2].messages
+    expect(String(third[1].content)).toContain('第一段摘要 + 此后的进展')
+    // 第一次压剩的那个单元也被第二次压掉了,只剩本轮最新一次调用
+    expect(third.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)).toEqual(['n2'])
+  })
+
+  it('摘要调用失败时上下文原样继续,失败提示随事件推给界面', async () => {
+    const probe = makeTool('结果')
+    const fake = fakeCompactor([
+      {
+        compacted: false,
+        usage: { prompt: 900, completion: 0, estimated: true },
+        msg: '摘要调用失败:连接被拒绝'
+      }
+    ])
+    const { requests, events } = await run({
+      history: withHistory(),
+      script: [{ toolCalls: [makeCall('probe', '{"i":1}', 'o1')] }, { content: '结束' }],
+      tools: { probe },
+      compaction: { summary: '', historyIds: ['m1'], run: fake.run }
+    })
+
+    // 半截摘要冒充完整摘要比超窗更难排查:水位没动,原文照旧带着跑
+    const second = requests[1].messages
+    expect(asksOriginal(second)).toBe(true)
+    expect(second.filter((m) => isSummaryBlock(m))).toHaveLength(0)
+    expect(events.filter((e) => e.type === 'compact')).toMatchObject([
+      { type: 'compact', messageId: 'step-1', ok: false, msg: '摘要调用失败:连接被拒绝' }
+    ])
+  })
+
+  it('最后一步不再压缩:下一步不给工具,压了反而把要用的结论摘没', async () => {
+    const probe = makeTool('结果')
+    const fake = fakeCompactor([{ compacted: true, summary: '不该出现', coveredUnits: 1 }])
+    const { requests } = await run({
+      maxSteps: 1,
+      history: withHistory(),
+      script: [{ toolCalls: [makeCall('probe', '{}', 'l1')] }, { content: '结束' }],
+      tools: { probe },
+      compaction: { summary: '', historyIds: ['m1'], run: fake.run }
+    })
+
+    expect(fake.calls).toHaveLength(0)
+    expect(asksOriginal(requests[1].messages)).toBe(true)
   })
 })

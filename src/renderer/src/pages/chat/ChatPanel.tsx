@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Bubble, Sender, Suggestion, Welcome } from '@ant-design/x'
 import type { BubbleListProps } from '@ant-design/x'
 import XMarkdown from '@ant-design/x-markdown'
-import { Avatar, Button, Flex, Progress, Select, Space, Tag, Tooltip, theme } from 'antd'
+import { Avatar, Button, Flex, Popover, Progress, Select, Space, Tag, theme } from 'antd'
 import {
   RobotOutlined,
   SettingOutlined,
@@ -49,10 +49,14 @@ interface ChatPanelProps {
   /** 已配置的模型服务商(选择器按服务商分组) */
   providers: ModelProvider[]
   currentRef?: ModelRef
+  /** 手动压缩在等 IPC 返回 */
+  compacting: boolean
   /** skillName 为通过 / 选择的 skill,未选择时为 undefined */
   onSend: (content: string, skillName?: string) => void
   /** 用户点击停止按钮 */
   onCancel: () => void
+  /** 占用环里那颗「立即压缩上下文」 */
+  onCompact: () => void
   onModelChange: (ref: ModelRef) => void
   onOpenSettings: () => void
 }
@@ -177,13 +181,20 @@ function groupMessages(messages: Message[]): MessageGroup[] {
 
 interface ContextRingProps {
   usage: ContextUsage
+  /** 这一轮还在跑:主进程不允许压缩与 run 并发(两边会互相踩水位),按钮只能等着 */
+  busy: boolean
+  /** 手动压缩正在等 IPC 返回 */
+  compacting: boolean
+  onCompact: () => void
 }
 
 /**
  * 输入框底栏的上下文占用环。
- * 满刻度是当前模型的窗口,环上不写数字(底栏太挤),已用 / 窗口 / 裁剪点都放进 Tooltip。
+ * 满刻度是当前模型的窗口,环上不写数字(底栏太挤),Popover 里只报「已用 / 窗口 / 百分比」
+ * 加那颗手动压缩按钮 —— 压缩的账目与失败原因由聊天页的 message 提示说给用户,不堆在环上。
+ * 用 Popover 而不是 Tooltip:里面的按钮要能点。
  */
-function ContextRing({ usage }: ContextRingProps): React.JSX.Element {
+function ContextRing({ usage, busy, compacting, onCompact }: ContextRingProps): React.JSX.Element {
   const { token } = theme.useToken()
   const level = usageLevel(usage)
   const color =
@@ -193,16 +204,21 @@ function ContextRing({ usage }: ContextRingProps): React.JSX.Element {
         ? token.colorWarning
         : token.colorPrimary
   const percent = Math.round(usage.ratio * 100)
-  const trimPercent = Math.round((usage.trimAt / usage.window) * 100)
 
   return (
-    <Tooltip
-      title={
-        <>
-          {`已用 ${formatTokens(usage.used)}${usage.estimated ? '(估算)' : ''} / 窗口 ${formatTokens(usage.window)}`}
-          <br />
-          {`到 ${formatTokens(usage.trimAt)}(窗口的 ${trimPercent}%)就开始省略最旧的历史`}
-        </>
+    <Popover
+      trigger="click"
+      title={`已用 ${formatTokens(usage.used)}${usage.estimated ? '(估算)' : ''} / 窗口 ${formatTokens(usage.window)}(${percent}%)`}
+      content={
+        <Button
+          size="small"
+          type="primary"
+          loading={compacting}
+          disabled={busy}
+          onClick={onCompact}
+        >
+          立即压缩上下文
+        </Button>
       }
     >
       <Progress
@@ -216,7 +232,7 @@ function ContextRing({ usage }: ContextRingProps): React.JSX.Element {
         // 描边宽度不写:antd 对小圆环按「不小于 3px」自动算,比固定百分比更稳。
         styles={{ root: { display: 'flex' } }}
       />
-    </Tooltip>
+    </Popover>
   )
 }
 
@@ -227,8 +243,10 @@ function ChatPanel({
   sending,
   providers,
   currentRef,
+  compacting,
   onSend,
   onCancel,
+  onCompact,
   onModelChange,
   onOpenSettings
 }: ChatPanelProps): React.JSX.Element {
@@ -445,7 +463,14 @@ function ChatPanel({
                         去设置里添加模型
                       </Button>
                     )}
-                    {usage && <ContextRing usage={usage} />}
+                    {usage && (
+                      <ContextRing
+                        usage={usage}
+                        busy={sending}
+                        compacting={compacting}
+                        onCompact={onCompact}
+                      />
+                    )}
                   </Space>
                   {actions}
                 </Flex>

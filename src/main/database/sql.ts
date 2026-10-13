@@ -2,6 +2,12 @@ export const initSql = `-- 会话表
 CREATE TABLE IF NOT EXISTS conversations (
   id         TEXT PRIMARY KEY,
   title      TEXT NOT NULL DEFAULT '新对话',
+  -- 上下文压缩后的摘要正文;空串表示这个会话还没压过
+  summary    TEXT NOT NULL DEFAULT '',
+  -- 摘要已覆盖到最后一条消息的 id(水位);水位之前的行不再进请求
+  summary_until TEXT NOT NULL DEFAULT '',
+  -- 上次压缩的账目 JSON(SummaryMetrics),空串表示没有
+  summary_usage TEXT NOT NULL DEFAULT '',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -99,6 +105,23 @@ export const columnMigrations: { table: string; column: string; ddl: string }[] 
     table: 'messages',
     column: 'tokens_estimated',
     ddl: 'ALTER TABLE messages ADD COLUMN tokens_estimated INTEGER NOT NULL DEFAULT 0'
+  },
+  // 上下文压缩:摘要正文、水位消息 id、上次压缩的账目。原消息行一律不删,摘要只是
+  // "模型不再看到它们",界面仍能看到完整历史,摘要失败时也能退回原样。
+  {
+    table: 'conversations',
+    column: 'summary',
+    ddl: "ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''"
+  },
+  {
+    table: 'conversations',
+    column: 'summary_until',
+    ddl: "ALTER TABLE conversations ADD COLUMN summary_until TEXT NOT NULL DEFAULT ''"
+  },
+  {
+    table: 'conversations',
+    column: 'summary_usage',
+    ddl: "ALTER TABLE conversations ADD COLUMN summary_usage TEXT NOT NULL DEFAULT ''"
   }
 ]
 

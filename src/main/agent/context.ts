@@ -5,6 +5,7 @@ import {
   estimateRequestTokens,
   estimateTextTokens
 } from '../tokens/estimate'
+import { groupTurns, splitUnits, tokensOf, type Turn, type TurnUnit } from './turns'
 
 /**
  * 模型没填上下文窗口时的兜底:按主流的 128k 算。
@@ -57,62 +58,6 @@ export function budgetFor(contextWindow?: number): ContextBudget {
       : DEFAULT_CONTEXT_WINDOW
   // 窗口扣不掉输出预留时按 0 算,不能给负额度 —— 用户把窗口填得比输出预留还小时会踩到
   return { window: size, input: Math.max(0, Math.floor(size * SAFETY_RATIO) - OUTPUT_RESERVE) }
-}
-
-/** 一轮:一条 user 消息连同它之后的 assistant / tool 行 */
-interface Turn {
-  messages: ChatCompletionMessage[]
-  tokens: number
-}
-
-/** 一轮内可整体弃留的最小单元:一次 assistant 输出 + 它发起的全部工具结果 */
-interface Unit {
-  messages: ChatCompletionMessage[]
-  tokens: number
-}
-
-function tokensOf(messages: ChatCompletionMessage[]): number {
-  return messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0)
-}
-
-/**
- * 按 user 消息切轮。
- * 发起调用的 assistant 行和它的 tool 结果必然落在同一轮里,于是"整轮丢弃"结构上
- * 不可能产生孤儿 tool_calls —— 孤儿行是本项目已经踩过一次的坑,不能靠裁剪时小心配对,
- * 只能让它在结构上拆不开。
- */
-function groupTurns(messages: ChatCompletionMessage[]): Turn[] {
-  const turns: Turn[] = []
-  let current: Turn | null = null
-  for (const message of messages) {
-    if (current === null || message.role === 'user') {
-      current = { messages: [], tokens: 0 }
-      turns.push(current)
-    }
-    current.messages.push(message)
-    current.tokens += estimateMessageTokens(message)
-  }
-  return turns
-}
-
-/**
- * 把一轮拆成可弃单元。
- * 首条 user 消息(用户的原始请求)单独成单元且永不弃;此后每个 assistant 输出
- * 带着它自己的工具结果成一个单元 —— 弃就弃整个,不会出现"有调用无响应"。
- */
-function splitUnits(turn: Turn): Unit[] {
-  const units: Unit[] = []
-  for (const message of turn.messages) {
-    const startsUnit = message.role === 'assistant' || message.role === 'user'
-    if (startsUnit || units.length === 0) {
-      units.push({ messages: [message], tokens: estimateMessageTokens(message) })
-      continue
-    }
-    const last = units[units.length - 1]
-    last.messages.push(message)
-    last.tokens += estimateMessageTokens(message)
-  }
-  return units
 }
 
 /** 保留头尾、省略中段;压无可压时原样返回 */
@@ -172,7 +117,7 @@ function evictWithinTurn(turn: Turn, maxTokens: number): { turn: Turn; droppedMe
   const head = units[0]
   const tail = units[units.length - 1]
   const middle = units.slice(1, -1)
-  const keptUnits: Unit[] = [tail]
+  const keptUnits: TurnUnit[] = [tail]
   let used = head.tokens + tail.tokens
   // 从最新往回收到塞不下为止:留连续后缀,中间挖洞会让模型误读步骤顺序
   for (let i = middle.length - 1; i >= 0; i--) {
@@ -195,7 +140,14 @@ function isShrunk(message: ChatCompletionMessage): boolean {
 export interface PlanInput {
   /** 固定在首位的系统提示 */
   system?: ChatCompletionMessage
-  /** 参与裁剪的历史消息(不含 system,也不含本次现拼的循环控制消息) */
+  /**
+   * 紧跟 system 的固定头部(当前生效的上下文摘要)。
+   * 与 system 一样**永不参与丢弃与缩写**,也不落库:它的存在就是为了替代被压缩掉的那段历史。
+   * 位置固定在 system 之后、历史之前 —— 换到末尾模型会把它当新提问,并进 system 又会让
+   * 每次压缩都重写整个请求开头,把提示缓存全打掉。
+   */
+  head?: ChatCompletionMessage[]
+  /** 参与裁剪的历史消息(不含 system / head,也不含本次现拼的循环控制消息) */
   history: ChatCompletionMessage[]
   /** 本次现拼的循环控制消息(收尾提示 + 目标锚定),永不丢弃 */
   pinned?: ChatCompletionMessage[]
@@ -209,15 +161,20 @@ export interface ContextPlan {
 }
 
 /**
- * 把一次请求压进上下文预算,按代价从小到大三级降级:
+ * 把一次请求压进上下文预算。
+ *
+ * 常态下这里**不该动任何东西**:历史的长度由 agent/compact.ts 在超过阈值时压成摘要,
+ * 摘要之后的消息一律原文送出让请求前缀保持稳定(逐字节相同才可能命中提示缓存)。
+ * 下面三级降级只服务一个场景 —— 摘要之后仍然装不下,通常是某条工具结果自己就几万 token,
+ * 而它属于「最新的对话信息」不能被摘要替掉。此时按代价从小到大:
  *   1. 整轮丢最旧的历史,只保留连续的最近若干轮(留空洞会让模型误读时序);
  *   2. 某轮只是个别消息过长 → 缩写它再试,不整轮扔;
  *   3. 最近一轮自己就超预算 → 弃掉轮内较早的步骤,再不行缩写它。
- * system prompt、工具定义、循环控制消息、用户本次的请求原文永不参与丢弃。
+ * system prompt、固定头部(摘要)、工具定义、循环控制消息、用户本次的请求原文永不参与丢弃。
  * 压到下限仍然超预算时(窗口实在太小)会带着超限发出去,让端点报错,不静默改坏内容。
  */
 export function planContext(input: PlanInput): ContextPlan {
-  const head = input.system ? [input.system] : []
+  const head = [...(input.system ? [input.system] : []), ...(input.head ?? [])]
   const tail = input.pinned ?? []
   const available = Math.max(
     0,
@@ -258,8 +215,9 @@ export function planContext(input: PlanInput): ContextPlan {
     break
   }
 
-  // 顺序必须是 system → 历史 → 循环控制消息:目标锚定靠"近期性"起作用,
-  // 排到历史前面就失去意义了(见 agent/loop.ts 的实测记录)。
+  // 顺序必须是 system → 摘要 → 历史 → 循环控制消息:目标锚定靠"近期性"起作用,
+  // 排到历史前面就失去意义了(见 agent/loop.ts 的实测记录);摘要反过来必须排在历史前,
+  // 它就是用来替代那段历史的。
   const messages = [...head, ...kept.flatMap((t) => t.messages), ...tail]
   return {
     messages,
@@ -267,7 +225,8 @@ export function planContext(input: PlanInput): ContextPlan {
       budget: input.budget.input,
       droppedTurns,
       droppedMessages,
-      shrunkMessages: kept.reduce((sum, t) => sum + t.messages.filter(isShrunk).length, 0)
+      shrunkMessages: kept.reduce((sum, t) => sum + t.messages.filter(isShrunk).length, 0),
+      summaryTokens: tokensOf(input.head ?? [])
     }
   }
 }

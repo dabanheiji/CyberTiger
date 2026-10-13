@@ -3,6 +3,12 @@ import type { ToolCallRecord } from './dto'
 export interface Conversation {
   id: string
   title: string
+  /** 上下文压缩后的摘要正文;空串表示还没压过 */
+  summary: string
+  /** 摘要覆盖到最后一条消息的 id(水位);空串表示模型仍能看到全部历史 */
+  summary_until: string
+  /** 上次压缩的账目 JSON(SummaryMetrics);空串表示没有 */
+  summary_usage: string
   created_at: string
   updated_at: string
 }
@@ -46,6 +52,14 @@ export const chatSql = {
     list: 'SELECT * FROM conversations ORDER BY updated_at DESC',
     create: 'INSERT INTO conversations (id, title) VALUES (?, ?)',
     rename: 'UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    /** 只读摘要三列:构造请求与界面都要用,但不必把整行拉出来 */
+    summaryState: 'SELECT summary, summary_until, summary_usage FROM conversations WHERE id = ?',
+    /**
+     * 写入一次压缩结果。
+     * 不动 updated_at —— 压缩不是用户活动,不该把会话顶到列表最前。
+     */
+    setSummary:
+      'UPDATE conversations SET summary = ?, summary_until = ?, summary_usage = ? WHERE id = ?',
     remove: 'DELETE FROM conversations WHERE id = ?',
     resort: 'UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?'
   },
@@ -59,6 +73,14 @@ export const chatSql = {
      */
     listTopLevel:
       "SELECT * FROM messages WHERE conversation_id = ? AND parent_call_id = '' ORDER BY created_at ASC, rowid ASC",
+    /**
+     * 只取水位之后的顶层行 —— 上下文压缩后发给模型的那段历史。
+     * 靠 rowid 比较而不是 created_at:同一秒写入的多行会分不出先后,而 uuid 根本不排序。
+     * 水位行的 id 若已不存在(理论上只有手工删库),COALESCE 退成 -1,
+     * 等于"没有水位、全量回放" —— 宁可多给内容,也不能悄悄少给。
+     */
+    listTopLevelAfter:
+      "SELECT * FROM messages WHERE conversation_id = ? AND parent_call_id = '' AND rowid > COALESCE((SELECT rowid FROM messages WHERE id = ?), -1) ORDER BY created_at ASC, rowid ASC",
     add: 'INSERT INTO messages (id, conversation_id, role, content, skill) VALUES (?, ?, ?, ?, ?)',
     /** Agent 的一步:空 assistant 行占位 */
     addAssistantStep:

@@ -102,7 +102,8 @@ describe('planContext 在预算内', () => {
       budget: 1000,
       droppedTurns: 0,
       droppedMessages: 0,
-      shrunkMessages: 0
+      shrunkMessages: 0,
+      summaryTokens: 0
     })
   })
 
@@ -194,6 +195,54 @@ describe('planContext 压到底仍然超预算', () => {
     expect(markers(plan.messages)).toEqual(['乙'])
     expect(plan.messages[0].content).toBe('乙' + '中'.repeat(99))
     expect(plan.meter).toMatchObject({ droppedTurns: 1, droppedMessages: 0, shrunkMessages: 0 })
+  })
+})
+
+describe('planContext 的固定头部(上下文摘要)', () => {
+  it('排在 system 之后、历史之前,计量里单给出它占多少', () => {
+    const system = msg('system', 'S', 10)
+    const head = msg('user', '摘', 30)
+    const history = [msg('user', '甲', 10), msg('assistant', '乙', 10)]
+    const plan = planContext({ system, head: [head], history, tools: [], budget: budget(1000) })
+
+    expect(markers(plan.messages)).toEqual(['S', '摘', '甲', '乙'])
+    expect(plan.meter.summaryTokens).toBe(34)
+  })
+
+  it('头部占用先从额度里扣掉,历史能分到的更少', () => {
+    const head = msg('user', '摘', 500)
+    // 两轮各 108。额度 615 = 请求开销 3 + 摘要 504 + 一轮 108:
+    // 不带摘要时两轮都塞得下,带上就只能留下最近一轮
+    const history = [
+      msg('user', '甲', 50),
+      msg('assistant', '乙', 50),
+      msg('user', '丙', 50),
+      msg('assistant', '丁', 50)
+    ]
+    const plan = planContext({ head: [head], history, tools: [], budget: budget(615) })
+
+    expect(markers(plan.messages)).toEqual(['摘', '丙', '丁'])
+    expect(plan.meter).toMatchObject({ droppedTurns: 1, summaryTokens: 504 })
+    expectNoOrphanCalls(plan.messages)
+  })
+
+  it('窗口小到装不下时也不丢头部:它就是替代历史的,丢了模型什么都不记得', () => {
+    const system = msg('system', 'S', 50)
+    // 摘要本身写成超长的一条,验证它不会被缩写改坏(改写会打掉整个请求前缀)
+    const head: ChatCompletionMessage = { role: 'user', content: '摘' + '中'.repeat(3999) }
+    const history = [msg('user', '甲', 100)]
+    const plan = planContext({
+      system,
+      head: [head],
+      history,
+      pinned: [],
+      tools: [],
+      budget: budget(5)
+    })
+
+    expect(markers(plan.messages)).toEqual(['S', '摘', '甲'])
+    expect(plan.messages[1].content).toBe(head.content)
+    expect(plan.meter.shrunkMessages).toBe(0)
   })
 })
 

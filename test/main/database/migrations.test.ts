@@ -72,6 +72,29 @@ describe('补列迁移', () => {
     ])
   })
 
+  it('老会话表补出摘要三列,旧行读到的是空串而不是 null', () => {
+    legacyDb()
+    db.prepare("INSERT INTO conversations (id, title) VALUES ('c1', '老会话')").run()
+    runColumnMigrations(asMigrationDb(db))
+    expect(columnNames(db, 'conversations')).toEqual([
+      'id',
+      'title',
+      'created_at',
+      'updated_at',
+      'summary',
+      'summary_until',
+      'summary_usage'
+    ])
+    expect(db.prepare('SELECT * FROM conversations').get()).toMatchObject({
+      summary: '',
+      summary_until: '',
+      summary_usage: ''
+    })
+    // 再跑一次不报错也不重复加列(启动时迁移每次都会跑)
+    runColumnMigrations(asMigrationDb(db))
+    expect(columnNames(db, 'conversations')).toHaveLength(7)
+  })
+
   it('旧行迁移后读到的是各自列的默认值', () => {
     legacyDb()
     db.prepare("INSERT INTO conversations (id, title) VALUES ('c1', '会话')").run()
@@ -210,31 +233,44 @@ describe('整表重建迁移', () => {
 })
 
 describe('SCHEMA 与迁移清单的一致性', () => {
-  /** 从 initSql 里取出 messages 的列名 */
-  function declaredColumns(): string[] {
-    const head = 'CREATE TABLE IF NOT EXISTS messages ('
-    const start = initSql.indexOf(head)
-    const body = initSql.slice(start + head.length, initSql.indexOf(');', start))
-    return body
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith('--'))
-      .map((line) => line.split(/\s+/)[0].replace(/,/g, ''))
+  /**
+   * 从 initSql 里取出某张表的列名(按声明顺序)。
+   * 逐行读到单独的 `);` 为止:注释里也出现 `);`,按字符串 indexOf 找结尾会提前截断。
+   */
+  function declaredColumns(table: string): string[] {
+    const head = `CREATE TABLE IF NOT EXISTS ${table} (`
+    const lines = initSql.slice(initSql.indexOf(head) + head.length).split('\n')
+    const columns: string[] = []
+    for (const line of lines) {
+      const text = line.trim()
+      if (text === ');') break
+      if (text.length === 0 || text.startsWith('--')) continue
+      columns.push(text.split(/\s+/)[0].replace(/,/g, ''))
+    }
+    return columns
   }
 
-  it('除最初五列外,每个列都有对应的补列迁移', () => {
-    const baseline = ['id', 'conversation_id', 'role', 'content', 'created_at']
-    const migrated = columnMigrations.filter((m) => m.table === 'messages').map((m) => m.column)
-    for (const column of declaredColumns()) {
-      if (baseline.includes(column)) continue
-      expect(migrated).toContain(column)
+  /** 建表时就有的列:它们不需要补列迁移 */
+  const baseline: Record<string, string[]> = {
+    messages: ['id', 'conversation_id', 'role', 'content', 'created_at'],
+    conversations: ['id', 'title', 'created_at', 'updated_at']
+  }
+
+  it('除最初几列外,每个列都有对应的补列迁移', () => {
+    for (const table of ['messages', 'conversations']) {
+      const migrated = columnMigrations
+        .filter((m) => m.table === table)
+        .map((m) => `${table}.${m.column}`)
+      for (const column of declaredColumns(table)) {
+        if (baseline[table].includes(column)) continue
+        expect(migrated).toContain(`${table}.${column}`)
+      }
     }
   })
 
   it('迁移清单里不存在 initSql 中没有的列', () => {
-    const declared = declaredColumns()
     for (const m of columnMigrations) {
-      expect(declared).toContain(m.column)
+      expect(declaredColumns(m.table), `${m.table}.${m.column}`).toContain(m.column)
       expect(m.ddl).toContain(`ADD COLUMN ${m.column} `)
     }
   })
@@ -242,6 +278,6 @@ describe('SCHEMA 与迁移清单的一致性', () => {
   it('重建 SQL 的列清单与新表完全一致', () => {
     const rebuild = tableRebuilds.find((r) => r.table === 'messages')
     const inserted = rebuild?.rebuildSql.match(/INSERT INTO messages_new \(([^)]*)\)/)?.[1]
-    expect(inserted?.split(',').map((s) => s.trim())).toEqual(declaredColumns())
+    expect(inserted?.split(',').map((s) => s.trim())).toEqual(declaredColumns('messages'))
   })
 })

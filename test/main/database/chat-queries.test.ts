@@ -1,7 +1,7 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { initSql } from '../../../src/main/database/sql'
 import { chatSql, type MessageRow } from '../../../src/main/chat/sql'
-import { parseToolCalls, rowToMessage } from '../../../src/main/chat/service'
+import { parseSummaryMetrics, parseToolCalls, rowToMessage } from '../../../src/main/chat/service'
 import type { RunScope } from '../../../src/main/chat/dto'
 
 let db: DatabaseSync
@@ -344,5 +344,119 @@ describe('tool_calls 列的 JSON 往返', () => {
     const messages = rows(chatSql.messages.listTopLevel, 'c1').map(rowToMessage)
     expect(messages[0].tool_calls).toEqual([])
     expect(messages[0].content).toBe('答案')
+  })
+})
+
+describe('摘要列与按水位取历史', () => {
+  interface SummaryRow {
+    summary: string
+    summary_until: string
+    summary_usage: string
+  }
+
+  function summaryState(id = 'c1'): SummaryRow {
+    return db.prepare(chatSql.conversations.summaryState).get(id) as unknown as SummaryRow
+  }
+
+  /** 与 service.commitSummary 严格一致的参数顺序:三个写入值 + 会话 id */
+  function commit(summary: string, until: string, usage: string, id = 'c1'): void {
+    db.prepare(chatSql.conversations.setSummary).run(summary, until, usage, id)
+  }
+
+  function afterWatermark(until: string, id = 'c1'): string[] {
+    return rows(chatSql.messages.listTopLevelAfter, id, until).map((r) => r.id)
+  }
+
+  /** u1 a1 t1 a2 四条顶层行,外加两条挂在 task-1 下的子 agent 行 */
+  function seed(): void {
+    addConversation('c1')
+    db.prepare(chatSql.messages.add).run('u1', 'c1', 'user', '帮我调研', '')
+    addStep('a1', scope())
+    addStep('sa1', scope({ agent: 'researcher', parentCallId: 'task-1', depth: 1 }))
+    addTool('t1', scope(), 'task-1', '子结论')
+    addStep('sa2', scope({ agent: 'researcher', parentCallId: 'task-1', depth: 1 }))
+    addStep('a2', scope())
+    db.prepare(chatSql.messages.add).run('u2', 'c1', 'user', '再查一下天气', '')
+  }
+
+  it('新建的会话摘要三列都是空串,读出来即「没压过」', () => {
+    addConversation('c1')
+    expect(summaryState()).toEqual({ summary: '', summary_until: '', summary_usage: '' })
+  })
+
+  it('setSummary 写入后原样读回,且不动 updated_at', () => {
+    addConversation('c1')
+    addConversation('c2')
+    db.prepare("UPDATE conversations SET updated_at = '2020-01-01 00:00:00' WHERE id = 'c1'").run()
+    commit('前情摘要', 'a2', '{"prompt":900,"completion":60,"estimated":false}')
+
+    expect(summaryState()).toEqual({
+      summary: '前情摘要',
+      summary_until: 'a2',
+      summary_usage: '{"prompt":900,"completion":60,"estimated":false}'
+    })
+    // 压缩不是用户活动:把会话顶到列表最前会打乱侧栏顺序
+    expect(db.prepare(chatSql.conversations.list).all()).toMatchObject([{ id: 'c2' }, { id: 'c1' }])
+  })
+
+  it('水位为空串时退化成全量顶层行(与 listTopLevel 一致)', () => {
+    seed()
+    expect(afterWatermark('')).toEqual(rows(chatSql.messages.listTopLevel, 'c1').map((r) => r.id))
+  })
+
+  it('水位之后的顶层行才进请求,子 agent 的行依旧排除在外', () => {
+    seed()
+    // 摘要覆盖到 a1:此后是 task 结果、收尾回答与第二条提问
+    expect(afterWatermark('a1')).toEqual(['t1', 'a2', 'u2'])
+  })
+
+  it('水位落在最后一条时给出空历史:新写的摘要就是全部已知信息', () => {
+    seed()
+    expect(afterWatermark('u2')).toEqual([])
+  })
+
+  it('水位行的 id 查不到时按「无水位」全量回放,宁可多给也不悄悄少给', () => {
+    seed()
+    expect(afterWatermark('已被手工删掉')).toEqual(['u1', 'a1', 't1', 'a2', 'u2'])
+  })
+
+  it('水位只在自己的会话内生效,不会跨会话截断', () => {
+    seed()
+    addConversation('c2')
+    db.prepare(chatSql.messages.add).run('v1', 'c2', 'user', '另一个会话', '')
+    commit('摘要', 'a1', '')
+    expect(afterWatermark('a1', 'c2')).toEqual(['v1'])
+  })
+
+  it('parseSummaryMetrics:合法 JSON 逐字段带出,缺省字段补 0 或 false', () => {
+    expect(
+      parseSummaryMetrics(
+        '{"prompt":900,"completion":60,"estimated":true,"coveredMessages":12,"coveredTokens":8000,"at":"2026-10-12T00:00:00Z"}'
+      )
+    ).toEqual({
+      prompt: 900,
+      completion: 60,
+      estimated: true,
+      coveredMessages: 12,
+      coveredTokens: 8000,
+      at: '2026-10-12T00:00:00Z'
+    })
+    expect(parseSummaryMetrics('{"prompt":1,"completion":2}')).toEqual({
+      prompt: 1,
+      completion: 2,
+      estimated: false,
+      coveredMessages: 0,
+      coveredTokens: 0,
+      at: ''
+    })
+  })
+
+  it('parseSummaryMetrics:空串、坏 JSON、非对象与缺关键字段都当作没有账目', () => {
+    expect(parseSummaryMetrics('')).toBeUndefined()
+    expect(parseSummaryMetrics('{坏了')).toBeUndefined()
+    expect(parseSummaryMetrics('null')).toBeUndefined()
+    expect(parseSummaryMetrics('[]')).toBeUndefined()
+    expect(parseSummaryMetrics('{"prompt":1}')).toBeUndefined()
+    expect(parseSummaryMetrics('{"prompt":"900","completion":2}')).toBeUndefined()
   })
 })

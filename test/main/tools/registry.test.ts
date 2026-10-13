@@ -1,9 +1,31 @@
+import { vi } from 'vitest'
 import {
+  builtinTools,
   createToolRunner,
+  getAllTools,
   isVolatileTool,
   toChatCompletionTools
 } from '../../../src/main/tools/registry'
 import type { ToolDefinition } from '../../../src/main/tools/types'
+
+/**
+ * mcpManager 换成替身:getAllTools 会把它的工具接在内置之后,
+ * 用例靠 mcpPool.tools 控制有哪些、什么顺序。
+ */
+const mcpPool = { tools: [] as string[] }
+
+vi.mock('../../../src/main/mcp/manager', () => ({
+  mcpManager: {
+    // 惰性读取 mcpPool:用例运行时常量早已初始化,替身里只关心名字顺序
+    getTools: (): ToolDefinition[] =>
+      mcpPool.tools.map((name) => ({
+        name,
+        description: `工具 ${name}`,
+        parameters: { type: 'object', properties: {} },
+        execute: () => ''
+      }))
+  }
+}))
 
 function tool(
   name: string,
@@ -193,5 +215,33 @@ describe('toChatCompletionTools', () => {
   it('空工具集给出空数组,模型就不会看到 tools 字段', () => {
     expect(toChatCompletionTools([])).toEqual([])
     expect(createToolRunner([]).toChatCompletionTools()).toEqual([])
+  })
+})
+
+describe('getAllTools 的稳定顺序', () => {
+  it('MCP 部分按名字排序,与 server 的连接顺序无关', () => {
+    mcpPool.tools = ['zeta_tool', 'alpha_tool', 'middle_tool']
+    const names = getAllTools().map((t) => t.name)
+    expect(names.slice(builtinTools.length)).toEqual(['alpha_tool', 'middle_tool', 'zeta_tool'])
+    // 内置部分保持声明序:它不随外部状态变,顺手重排只会白白打掉请求前缀
+    expect(names.slice(0, builtinTools.length)).toEqual(builtinTools.map((t) => t.name))
+  })
+
+  it('重连导致顺序变化后,同一份工具集仍拼出同一个名字序列', () => {
+    mcpPool.tools = ['a', 'b']
+    const first = getAllTools()
+      .map((t) => t.name)
+      .join(',')
+    mcpPool.tools = ['b', 'a']
+    expect(
+      getAllTools()
+        .map((t) => t.name)
+        .join(',')
+    ).toBe(first)
+  })
+
+  it('没有 MCP 连接时只剩内置工具', () => {
+    mcpPool.tools = []
+    expect(getAllTools().map((t) => t.name)).toEqual(builtinTools.map((t) => t.name))
   })
 })

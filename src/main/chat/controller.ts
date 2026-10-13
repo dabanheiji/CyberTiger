@@ -7,14 +7,17 @@ import {
   renameConversation as renameConversationService,
   removeConversation as removeConversationService,
   generateReply as generateReplyService,
-  abortReply as abortReplyService
+  abortReply as abortReplyService,
+  compactConversationManually
 } from './service'
 import type {
   createFirstMessageDto,
   sendMessageDto,
   renameConversationDto,
   generateReplyDto,
+  compactDto,
   ChatStreamEvent,
+  CompactReport,
   IpcResult
 } from './dto'
 import type { Conversation, Message } from './sql'
@@ -89,4 +92,22 @@ export function abortReply(_e: IpcMainInvokeEvent, runId: string): IpcResult<nul
     abortReplyService(runId)
     return null
   })
+}
+
+/**
+ * 手动压缩一次会话的上下文。
+ *
+ * 这是个** awaited** 的 handler:压缩就是几次模型调用,渲染层要等它才能刷新占用环,
+ * IPC 返回值天然就是「按钮的 loading 该在哪一刻停」。返回值不套 IpcResult 的既有约定不变,
+ * 但 `compacted: false` 不是错误 —— 计划拒绝(省不出空间)也要正常回给界面解释原因。
+ */
+export async function compactContext(
+  _e: IpcMainInvokeEvent,
+  dto: compactDto
+): Promise<IpcResult<CompactReport>> {
+  try {
+    return { success: true, data: await compactConversationManually(dto) }
+  } catch (error) {
+    return { success: false, msg: error instanceof Error ? error.message : String(error) }
+  }
 }

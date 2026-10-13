@@ -5,9 +5,23 @@ import {
   type StreamChatParams,
   type StreamChatResult
 } from '../chat/llm'
-import type { ChatStreamEvent, RunScope, ToolCallRecord, TokenUsage } from '../chat/dto'
+import type {
+  ChatStreamEvent,
+  RunScope,
+  SummaryMetrics,
+  ToolCallRecord,
+  TokenUsage
+} from '../chat/dto'
 import type { ToolExecResult, ToolRunner } from '../tools/registry'
 import { estimateRequestTokens, estimateTextTokens } from '../tokens/estimate'
+import {
+  isSummaryBlock,
+  summaryBlock,
+  taskStateNote,
+  type CompactSizing,
+  type CompactUnit
+} from './compact'
+import { splitIdentifiedUnits, tokensOf, type IdentifiedMessage, type UnitOf } from './turns'
 import { budgetFor, planContext, type ContextBudget } from './context'
 import { STEP_LIMIT_PROMPT } from './prompt'
 
@@ -58,6 +72,19 @@ function latestRequest(history: ChatCompletionMessage[]): string {
 }
 
 /**
+ * 把带 id 的单元换成压缩模块要的单元形状。
+ * 摘要只需要边界、token 数和水位落点;每条消息的 id 留在 loop 手里,
+ * 压完重建上下文时还要靠它对齐。
+ */
+function asCompactUnits(units: UnitOf<IdentifiedMessage>[]): CompactUnit[] {
+  return units.map((unit) => ({
+    messages: unit.items.map((item) => item.message),
+    tokens: unit.tokens,
+    lastId: unit.items[unit.items.length - 1].id
+  }))
+}
+
+/**
  * 把本次 run 的请求重新贴到消息列表**末尾**,每一步都锚定一次目标。
  *
  * ReAct 循环每转一步,用户的原始问题就被自己的 assistant / tool 消息往下压一层。
@@ -101,6 +128,44 @@ export interface AgentStore {
   touchConversation: (conversationId: string) => void
 }
 
+/** 一次 run 中途压缩所需的注入点 */
+export type RunCompactor = (request: RunCompactRequest) => Promise<RunCompactResult>
+
+/**
+ * loop 交给 service 的压缩请求。
+ *
+ * 单元、规模与「正在做什么」都由 loop 算 —— 它最清楚下一步要发什么,也才拿得到执行结论;
+ * 落库与推进水位由 service 做 —— 循环模块不碰 DB,和 AgentStore 同一个理由。
+ */
+export interface RunCompactRequest {
+  scope: RunScope
+  /** 触发压缩的那一步(从 1 起),写进便签当作进度 */
+  step: number
+  /** 本次 run 要回答的请求 */
+  request: string
+  /** 当前上下文的单元切分(带库内 id),边界只能落在这些单元上 */
+  units: CompactUnit[]
+  /** 规模:固定开销(system + 工具 + 锚定)、当前摘要占用、模型配置的窗口 */
+  sizing: CompactSizing
+  /** 当前生效的摘要;新摘要在它基础上合并 */
+  summary: string
+  /** 执行状态便签:任务能跨压缩续跑全靠它 */
+  note: string
+}
+
+/** 压缩的结论;`compacted === false` 时 loop 什么都不改 */
+export interface RunCompactResult {
+  compacted: boolean
+  /** 新摘要:替换旧的那份,而不是叠加 */
+  summary?: string
+  /** 被摘要覆盖掉的单元数(从最旧数起):loop 据此重建自己的上下文 */
+  coveredUnits?: number
+  usage?: TokenUsage
+  metrics?: SummaryMetrics
+  /** 摘要调用失败或被中止时的中文提示 */
+  msg?: string
+}
+
 export interface RunAgentParams {
   /** 本次 run 的作用域;depth 为 0 即最外层 */
   scope: RunScope
@@ -127,6 +192,15 @@ export interface RunAgentParams {
    * 与 AgentStore 同样的注入风格,让 ReAct 循环的每条分支能在无网络条件下被验证。
    */
   stream?: (params: StreamChatParams) => Promise<StreamChatResult>
+  /**
+   * run 中途的上下文压缩。只有主 Agent 传:子 Agent 上下文本来就是自己那份任务,
+   * 压掉的过程它自己还要用,再压一次只会把结论压没(取舍见 AGENTS.md)。
+   *
+   * `historyIds` 必须与 history 里「水位之后的那些行」一一对应(不含 system 与摘要块):
+   * 水位要落在具体一条已落库的消息上,没有 id 就推不动。两者打包成一个对象,
+   * 就是为了防止只传一半 —— 少了 id 的压缩会写出一个对不上行的水位。
+   */
+  compaction?: { summary: string; historyIds: string[]; run: RunCompactor }
 }
 
 /** run 的产出;子 agent 的 spawner 依此取回最终回答 */
@@ -159,13 +233,26 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
   const source = [...params.history]
   // 首位的 system 固定保留,其余消息才进裁剪
   const system = source[0]?.role === 'system' ? source[0] : undefined
-  const context = system ? source.slice(1) : source
+  const rest = system ? source.slice(1) : source
+  // 紧跟 system 的摘要块与它同属固定头部:它替代的正是被压掉的那段历史,
+  // 再参与逐步裁剪就会把「摘要」也裁掉,模型于是彻底失去前情
+  let head: ChatCompletionMessage[] = []
+  while (isSummaryBlock(rest[head.length])) head.push(rest[head.length])
+  // 上下文带着库内 id:压缩的水位必须落在具体某条已落库的消息上,没有 id 就推不动水位。
+  // 不压缩的 run(子 Agent)填空串,那些位置永远不会被当成水位落点。
+  const ids = params.compaction?.historyIds ?? []
+  let context: IdentifiedMessage[] = rest
+    .slice(head.length)
+    .map((message, i) => ({ id: ids[i] ?? '', message }))
+  const messages = (): ChatCompletionMessage[] => context.map((item) => item.message)
   const tools = params.runner.toChatCompletionTools()
   // 同一 run 内"同名 + 同参数"的工具只真正执行一次。模型有时会为了"更新"重复发起
   // 一模一样的调用(实测:一轮里对 get_current_time 连调两次),这里直接复用上次结果。
   const toolCache = new Map<string, ToolExecResult>()
   // 本次 run 要回答的那条请求(主 agent 是用户的最新消息,子 agent 是任务说明)
-  const request = latestRequest(context)
+  const request = latestRequest(messages())
+  // 当前生效的摘要:中途压缩会换掉它,下一次压缩要在新的那份基础上继续合并
+  let summary = params.compaction?.summary ?? ''
   // 终止步的正文才是答案:停在工具步时 content 为空,继续往后找
   let finalContent = ''
 
@@ -181,7 +268,14 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
       if (finalStep) pinned.push({ role: 'user', content: STEP_LIMIT_PROMPT })
       // 第 1 步的请求本来就紧跟在 system prompt 后面,无需锚定
       if (step > 1 && request) pinned.push(goalAnchor(request))
-      const plan = planContext({ system, history: context, pinned, tools: stepTools, budget })
+      const plan = planContext({
+        system,
+        head,
+        history: messages(),
+        pinned,
+        tools: stepTools,
+        budget
+      })
       const estimatedPrompt = estimateRequestTokens(plan.messages, stepTools)
 
       const messageId = store.addStep(scope)
@@ -229,20 +323,30 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
 
       if (content) finalContent = content
 
-      // 收尾步不再执行工具,即便模型仍返回了调用
-      if (signal.aborted || calls.length === 0 || finalStep) break
+      // 收尾步(工具已被收走)与中止都不再执行调用,但这些调用已随 assistant 行落库,
+      // 必须各有一条 tool 行收尾,否则下一轮回放就是孤儿 tool_calls
+      if (signal.aborted || calls.length === 0 || finalStep) {
+        settleUnexecuted(store, scope, emit, calls, new Set())
+        break
+      }
 
       // 把本步的 assistant 消息追加进上下文,再逐个执行工具并追加观察结果
       context.push({
-        role: 'assistant',
-        content: content || null,
-        tool_calls: calls.map((c) => ({
-          id: c.id,
-          type: 'function' as const,
-          function: { name: c.name, arguments: c.arguments }
-        }))
+        id: messageId,
+        message: {
+          role: 'assistant',
+          content: content || null,
+          tool_calls: calls.map((c) => ({
+            id: c.id,
+            type: 'function' as const,
+            function: { name: c.name, arguments: c.arguments }
+          }))
+        }
       })
 
+      const executed = new Set<string>()
+      // 本轮已执行的工具与结论:中途压缩时写进便签,续跑才知道什么不必再做
+      const conclusions: { name: string; arguments: string; ok: boolean; result: string }[] = []
       for (const call of calls) {
         if (signal.aborted) break
         emit({ type: 'tool_call', scope, messageId, call })
@@ -261,7 +365,65 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
           ok: exec.ok,
           reused: cached !== undefined
         })
-        context.push({ role: 'tool', tool_call_id: call.id, content: exec.result })
+        context.push({
+          id: toolMessageId,
+          message: { role: 'tool', tool_call_id: call.id, content: exec.result }
+        })
+        conclusions.push({
+          name: call.name,
+          arguments: call.arguments,
+          ok: exec.ok,
+          result: exec.result
+        })
+        executed.add(call.id)
+      }
+      // 循环中途被停止:剩下的调用同样已经落库,一样要收尾
+      settleUnexecuted(store, scope, emit, calls, executed)
+
+      // 越过触发线就在这次工具之后压一次:下一步的请求就只带摘要 + 最近的原文。
+      // 收尾步不做 —— 下一步不给工具,本来就小,压了反而把要用的结论摘没。
+      if (params.compaction && !signal.aborted && step < params.maxSteps) {
+        const units = splitIdentifiedUnits(context)
+        const result = await params.compaction.run({
+          scope,
+          step,
+          request,
+          units: asCompactUnits(units),
+          // 固定开销只算 system + 工具 + 下一步要贴的锚定;摘要单独作为 summaryTokens
+          sizing: {
+            fixedTokens: estimateRequestTokens(
+              [...(system ? [system] : []), ...(request ? [goalAnchor(request)] : [])],
+              tools
+            ),
+            summaryTokens: tokensOf(head),
+            window: budget.window
+          },
+          summary,
+          note: taskStateNote({
+            request,
+            step,
+            maxSteps: params.maxSteps,
+            executed: conclusions,
+            lastAssistant: content
+          })
+        })
+        if (result.usage) {
+          emit({
+            type: 'compact',
+            scope,
+            messageId,
+            ok: result.compacted,
+            usage: result.usage,
+            ...(result.metrics ? { metrics: result.metrics } : {}),
+            ...(result.msg ? { msg: result.msg } : {})
+          })
+        }
+        if (result.compacted && result.summary && typeof result.coveredUnits === 'number') {
+          // 上下文换成「新摘要 + 没被覆盖的后缀」:此后每一步都从这个新前缀继续长
+          summary = result.summary
+          head = [summaryBlock(summary)]
+          context = units.slice(result.coveredUnits).flatMap((unit) => unit.items)
+        }
       }
     }
 
@@ -279,6 +441,39 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
     const msg = error instanceof Error ? error.message : String(error)
     if (isRoot) emit({ type: 'error', scope, msg })
     return { finalContent, aborted: false, error: msg }
+  }
+}
+
+/** 本轮没来得及执行的工具调用,它的 tool 行写这个占位结论 */
+const UNEXECUTED_RESULT = '[本轮未执行,无结果]'
+
+/**
+ * 给「已落库的 assistant 行里没能执行的调用」补上 tool 行。
+ *
+ * assistant 行只要带着 tool_calls 进了库,每个调用 id 就必须有一条对应的 tool 行,
+ * 否则下一轮回放出现「有调用无响应」的孤儿行 —— 严格的 OpenAI 兼容端点直接 400,
+ * 而这状态会被摘要压缩永久固化下去。两条分支会走到这里:
+ *   - 收尾步:工具已被收走,模型却仍然返回了调用(见 `finalStep`);
+ *   - 中途停止:3 个调用只跑了 1 个,用户按了停止。
+ */
+function settleUnexecuted(
+  store: AgentStore,
+  scope: RunScope,
+  emit: (event: ChatStreamEvent) => void,
+  calls: ToolCallRecord[],
+  executed: Set<string>
+): void {
+  for (const call of calls) {
+    if (executed.has(call.id)) continue
+    const toolMessageId = store.addToolMessage(scope, call.id, UNEXECUTED_RESULT)
+    emit({
+      type: 'tool_result',
+      scope,
+      toolMessageId,
+      callId: call.id,
+      result: UNEXECUTED_RESULT,
+      ok: false
+    })
   }
 }
 
