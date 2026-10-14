@@ -7,6 +7,12 @@ export interface ToolContext {
    * task 工具靠它把派生出的子 agent 挂到"是哪一次 task 调用"下面(落库与流式事件都用)。
    */
   callId: string
+  /**
+   * 本次 run 的中止信号。
+   * 长耗时工具(shell 命令)靠它在用户点停止时杀掉子进程,否则 loop 已退出等待、
+   * 子进程还在后台跑。省略时工具只能靠自己设的超时收尾。
+   */
+  signal?: AbortSignal
 }
 
 /** 一个可供模型调用的本地工具 */

@@ -127,7 +127,10 @@ describe('工具挂载', () => {
     expect(builtinTools.map((t) => t.name)).toEqual([
       'get_current_time',
       'load_skill',
-      'read_skill_file'
+      'read_skill_file',
+      'read_file',
+      'write_file',
+      'run_command'
     ])
   })
 

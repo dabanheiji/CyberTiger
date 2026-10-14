@@ -1,13 +1,23 @@
 import type OpenAI from 'openai'
 import type { ToolContext, ToolDefinition, ToolExecResult } from './types'
 import { getCurrentTimeTool } from './time'
+import { fileTools } from './files'
+import { runCommandTool } from './shell'
 import { skillTools } from '../skills/tools'
 import { mcpManager } from '../mcp/manager'
 
 export type { ToolContext, ToolDefinition, ToolExecResult } from './types'
 
-/** 内置工具;新增内置工具在这里注册 */
-export const builtinTools: ToolDefinition[] = [getCurrentTimeTool, ...skillTools]
+/**
+ * 内置工具;新增内置工具在这里注册。
+ * 声明序就是下发给模型的顺序,它会决定请求前缀 —— 新工具追加在末尾,别插到中间。
+ */
+export const builtinTools: ToolDefinition[] = [
+  getCurrentTimeTool,
+  ...skillTools,
+  ...fileTools,
+  runCommandTool
+]
 
 /** 当前全部可用工具:内置 + 已连接的 MCP server 提供的。每次调用实时计算 */
 export function getAllTools(): ToolDefinition[] {

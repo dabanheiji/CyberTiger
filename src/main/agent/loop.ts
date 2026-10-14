@@ -353,7 +353,8 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
         const key = toolKey(call)
         const cached = toolCache.get(key)
         const exec =
-          cached ?? (await params.runner.execute(call.name, call.arguments, { callId: call.id }))
+          cached ??
+          (await params.runner.execute(call.name, call.arguments, { callId: call.id, signal }))
         if (!cached) toolCache.set(key, exec)
         const toolMessageId = store.addToolMessage(scope, call.id, exec.result)
         emit({
