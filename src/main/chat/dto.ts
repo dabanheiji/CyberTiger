@@ -109,6 +109,15 @@ export interface compactDto {
 }
 
 /**
+ * 切换会话的工作空间。
+ * dir 为空串表示清除:工具退回按应用当前目录解析,与从没选过一致。
+ */
+export interface setWorkspaceDto {
+  conversationId: string
+  dir: string
+}
+
+/**
  * 压缩被计划拒绝的原因(与 agent/compact.ts 的 `CompactReason` 同一支,字面量联合结构相同)。
  * 界面要据此解释「现在按了也省不出空间」,所以它不是错误,是一个需要展示的结论。
  */

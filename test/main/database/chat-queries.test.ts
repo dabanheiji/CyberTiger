@@ -460,3 +460,45 @@ describe('摘要列与按水位取历史', () => {
     expect(parseSummaryMetrics('{"prompt":"900","completion":2}')).toBeUndefined()
   })
 })
+
+describe('工作空间列', () => {
+  function readWorkspace(id = 'c1'): string | undefined {
+    const row = db.prepare(chatSql.conversations.workspace).get(id) as
+      { workspace: string } | undefined
+    return row?.workspace
+  }
+
+  it('新建的会话工作空间是空串,读出来即「没选过」', () => {
+    addConversation('c1')
+    expect(readWorkspace()).toBe('')
+  })
+
+  it('setWorkspace 写入后原样读回,清除即写回空串', () => {
+    addConversation('c1')
+    db.prepare(chatSql.conversations.setWorkspace).run('/Users/dev/code/shop', 'c1')
+    expect(readWorkspace()).toBe('/Users/dev/code/shop')
+    // 空串就是「没选」:工具据此退回应用当前目录
+    db.prepare(chatSql.conversations.setWorkspace).run('', 'c1')
+    expect(readWorkspace()).toBe('')
+  })
+
+  it('换目录不动 updated_at:它不是对话活动,不该把会话顶到列表最前', () => {
+    addConversation('c1')
+    addConversation('c2')
+    db.prepare("UPDATE conversations SET updated_at = '2020-01-01 00:00:00' WHERE id = 'c1'").run()
+    db.prepare(chatSql.conversations.setWorkspace).run('/ws', 'c1')
+    // 与 setSummary 同一条纪律:c2 仍排在前面
+    expect(db.prepare(chatSql.conversations.list).all()).toMatchObject([{ id: 'c2' }, { id: 'c1' }])
+  })
+
+  it('list 的 SELECT * 把 workspace 一起带出:渲染层据此显示每个会话各自的目录', () => {
+    addConversation('c1')
+    db.prepare(chatSql.conversations.setWorkspace).run('/ws/a', 'c1')
+    const [row] = db.prepare(chatSql.conversations.list).all() as { workspace?: string }[]
+    expect(row.workspace).toBe('/ws/a')
+  })
+
+  it('会话不存在时单列读不到行,而不是报错', () => {
+    expect(readWorkspace('nope')).toBeUndefined()
+  })
+})

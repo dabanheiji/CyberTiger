@@ -4,6 +4,7 @@ import {
   STALE_RESULT_PLACEHOLDER,
   buildHistory,
   skillsCatalog,
+  systemPromptMessage,
   toChatMessage,
   toIdentifiedMessages
 } from '../../../src/main/agent/history'
@@ -127,6 +128,43 @@ describe('system prompt 里的目录注入', () => {
   it('enableSubAgent 未设置按允许处理', () => {
     addAgent('researcher', '只做资料检索')
     expect(buildHistory([], [])[0].content).toContain('## 可用子 Agent')
+  })
+})
+
+describe('system prompt 里的工作空间', () => {
+  it('选了目录就把它写进 system,并说清相对路径按它解析', () => {
+    const content = systemPromptMessage('/Users/dev/code/shop').content as string
+    expect(content).toContain('## 本次会话的工作空间')
+    expect(content).toContain('/Users/dev/code/shop')
+    expect(content).toContain('相对路径')
+  })
+
+  it('没选目录时那一段整块不出现:提一个不存在的工作空间会让模型凭空编路径', () => {
+    const content = systemPromptMessage().content as string
+    expect(content).not.toContain('工作空间')
+    // 不选也要照旧是系统提示词开头,别让空串插出多余空行
+    expect(content.startsWith(SYSTEM_PROMPT)).toBe(true)
+  })
+
+  it('空白串视为没选', () => {
+    expect(systemPromptMessage('   ').content).not.toContain('工作空间')
+  })
+
+  it('说明那句只讲事实,不含「请在工作空间内操作」这类祈使', () => {
+    // 祈使会被模型当成本轮待办去执行(本项目在工具描述上踩过两次)
+    const content = systemPromptMessage('/ws').content as string
+    expect(content).not.toMatch(/请(?:只在|务必|优先)在/)
+  })
+
+  it('排在 skill 与角色目录之前:一个 run 的目录固定,而目录可能中途启停', () => {
+    addSkill(skillNames[0], '规划路线')
+    const content = systemPromptMessage('/ws').content as string
+    expect(content.indexOf('本次会话的工作空间')).toBeLessThan(content.indexOf('## 可用 Skills'))
+  })
+
+  it('buildHistory 把它带进第一条 system:发给模型的历史与送去摘要的是同一份开头', () => {
+    const history = buildHistory([], [], '', '/ws')
+    expect(history[0].content).toContain('/ws')
   })
 })
 

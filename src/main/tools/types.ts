@@ -13,6 +13,12 @@ export interface ToolContext {
    * 子进程还在后台跑。省略时工具只能靠自己设的超时收尾。
    */
   signal?: AbortSignal
+  /**
+   * 本次会话的工作空间目录(空/省略表示用户没选)。
+   * 文件工具据此解析相对路径,shell 工具拿它当缺省 cwd —— 一个 run 内在 startRun
+   * 固定一次,父子 agent 共用同一份,免得中途换目录把已发出的相对路径变成另一套含义。
+   */
+  workspace?: string
 }
 
 /** 一个可供模型调用的本地工具 */

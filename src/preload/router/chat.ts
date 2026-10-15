@@ -6,6 +6,7 @@ import type {
   renameConversationDto,
   generateReplyDto,
   compactDto,
+  setWorkspaceDto,
   ChatStreamEvent,
   CompactReport,
   IpcResult
@@ -35,6 +36,11 @@ export default {
    */
   compactContext: (dto: compactDto): Promise<IpcResult<CompactReport>> =>
     ipcRenderer.invoke('chat:compactContext', dto),
+  /** 弹系统对话框选一个目录;用户取消时 data 为 null */
+  pickWorkspace: (): Promise<IpcResult<string | null>> => ipcRenderer.invoke('chat:pickWorkspace'),
+  /** 切换会话的工作空间(dir 为空串即清除) */
+  setWorkspace: (dto: setWorkspaceDto): Promise<IpcResult<null>> =>
+    ipcRenderer.invoke('chat:setWorkspace', dto),
   /** 订阅流式事件,返回取消订阅函数 */
   onStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)

@@ -56,3 +56,22 @@ body {
 .cybertiger-skill-dropdown .ant-suggestion-item {
   min-width: 0;
 }
+
+/*
+ * 侧栏会话列表的分组标题(见 Sidebar 的 Conversations classNames.group)。
+ * .ant-conversations-group-title 是 flex 行,但标签本身没有 flex 尺寸,长目录名会
+ * 把行撑宽、组内那颗「+」也就贴不到右端;让标签吃满剩余宽度,里面的
+ * text-overflow: ellipsis 才有生效的机会,「+」也才和其他组对齐。
+ */
+.cybertiger-conversations-group .ant-conversations-group-label {
+  flex: 1;
+  min-width: 0;
+}
+
+/*
+ * 折叠照旧能用(点整行标题),但组件在行尾画的那个旋转箭头不展示 ——
+ * 开合状态改由标题前的文件夹图标(打开 / 关闭)表示,行尾再挂个箭头就重复了。
+ */
+.cybertiger-conversations-group .ant-conversations-group-collapse-trigger {
+  display: none;
+}

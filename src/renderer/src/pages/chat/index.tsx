@@ -5,6 +5,7 @@ import type { Conversation, Message } from '../../../../main/chat/sql'
 import type { AppSettings, ModelProvider, ModelRef } from '../../../../main/store/types'
 import { normalizeRef } from '../../../../main/store/modelRef'
 import { compactResultLine } from '../../lib/contextUsage'
+import { pushRecent } from '../../lib/workspace'
 import Sidebar from './Sidebar'
 import ChatPanel from './ChatPanel'
 import { useAgentStream } from '../../hooks/useAgentStream'
@@ -25,6 +26,10 @@ function ChatPage(): React.JSX.Element {
   const [currentRef, setCurrentRef] = useState<ModelRef | undefined>()
   // 手动压缩在等 IPC 返回:按钮转圈,同时避免连点起两次压缩
   const [compacting, setCompacting] = useState(false)
+  /** 草稿态待用的工作空间:首条消息建会话时由主进程抄进那一行 */
+  const [defaultWorkspace, setDefaultWorkspace] = useState('')
+  /** 最近用过的工作空间,最新在前;跨会话共享,所以放在设置里而不是会话行上 */
+  const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
   // 与 activeId 同步的 ref,供异步回调判断返回结果是否仍属于当前会话
   const activeIdRef = useRef<string | null>(null)
 
@@ -101,6 +106,8 @@ function ChatPage(): React.JSX.Element {
     setProviders(list)
     // 服务商被删、模型被移出清单时收敛到一个可用值,避免选择器停在悬空引用上
     setCurrentRef(normalizeRef(settings.currentModel, list))
+    setDefaultWorkspace(settings.defaultWorkspace ?? '')
+    setRecentWorkspaces(settings.workspaceRecent ?? [])
     return settings
   }, [])
 
@@ -130,6 +137,67 @@ function ChatPage(): React.JSX.Element {
       message.error(err instanceof Error ? err.message : String(err))
     }
   }
+
+  /**
+   * 把当前会话(或草稿)的工作空间换成 dir,空串即清除。
+   *
+   * 两条写路径必须分开:已有会话写 conversations.workspace,草稿态只能写全局的
+   * defaultWorkspace —— 那时还没有会话行可写。写错的表现是"选了但工具没跟着变",
+   * 所以按 activeIdRef 现读现判,而不是用可能过期的闭包值。
+   * 最近列表是跨会话的偏好,两边都往 settings.workspaceRecent 记一笔。
+   */
+  const applyWorkspace = async (dir: string): Promise<void> => {
+    const conversationId = activeIdRef.current
+    if (conversationId === null) {
+      setDefaultWorkspace(dir)
+      await window.api.settings.set('defaultWorkspace', dir)
+    } else {
+      const res = await window.api.chat.setWorkspace({ conversationId, dir })
+      if (!res.success) {
+        message.error(res.msg)
+        return
+      }
+      await refreshConversations()
+    }
+    if (!dir) return
+    const next = pushRecent(recentWorkspaces, dir)
+    setRecentWorkspaces(next)
+    await window.api.settings.set('workspaceRecent', next)
+  }
+
+  const handlePickWorkspace = async (): Promise<void> => {
+    const res = await window.api.chat.pickWorkspace()
+    if (!res.success) {
+      message.error(res.msg)
+      return
+    }
+    // 取消对话框:data 为 null,什么都不改
+    if (res.data === null) return
+    await applyWorkspace(res.data)
+  }
+
+  const handleClearWorkspace = async (): Promise<void> => {
+    await applyWorkspace('')
+  }
+
+  /**
+   * 组标题上的「+」:在该组的工作空间下新开会话。
+   *
+   * 走草稿态那条写路径 —— newConversation() 先把 activeIdRef 归 null,applyWorkspace
+   * 才会写 settings.defaultWorkspace 而不是去改某个已有会话的行;首条消息发出去时由
+   * 主进程把待用值抄进新建的那一行。不当场建会话行:点一下「+」就多出一条空对话,
+   * 用户往往只是看看,列表却被写脏。
+   */
+  const newConversationInWorkspace = async (dir: string): Promise<void> => {
+    newConversation()
+    await applyWorkspace(dir)
+  }
+
+  /** 当前显示的工作空间:草稿用待用值,已建会话用那一行自己记的 */
+  const activeWorkspace =
+    activeId === null
+      ? defaultWorkspace
+      : (conversations.find((c) => c.id === activeId)?.workspace ?? '')
 
   const handleSend = async (content: string, skillName?: string): Promise<void> => {
     const text = content.trim()
@@ -251,6 +319,7 @@ function ChatPage(): React.JSX.Element {
         activeId={activeId}
         onSelect={selectConversation}
         onNew={newConversation}
+        onNewInWorkspace={(dir) => void newConversationInWorkspace(dir)}
         onRename={handleRename}
         onDelete={handleDelete}
         onOpenSettings={openSettings}
@@ -264,11 +333,16 @@ function ChatPage(): React.JSX.Element {
         providers={providers}
         currentRef={currentRef}
         compacting={compacting}
+        workspace={activeWorkspace}
+        recentWorkspaces={recentWorkspaces}
         onSend={handleSend}
         onCancel={handleCancel}
         onCompact={() => void handleCompact()}
         onModelChange={handleModelChange}
         onOpenSettings={openSettings}
+        onPickWorkspace={() => void handlePickWorkspace()}
+        onSelectWorkspace={(dir) => void applyWorkspace(dir)}
+        onClearWorkspace={() => void handleClearWorkspace()}
       />
     </div>
   )

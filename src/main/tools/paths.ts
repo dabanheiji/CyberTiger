@@ -15,9 +15,39 @@ export function expandHome(target: string): string {
   return target
 }
 
-/** 把 path 解析成绝对路径:相对路径落在应用当前目录,调用方要把结果回给用户看 */
-export function resolvePath(target: string): string {
-  return path.resolve(expandHome(target.trim()))
+export interface Anchored {
+  /** 锚定后的绝对路径 */
+  path: string
+  /** true = 不在本次会话的工作空间子树内;仍可访问,只在结果里标注一句 */
+  outside: boolean
+}
+
+/**
+ * 把模型给的路径锚定到会话工作空间:绝对路径原样,`~` 前缀优先展开,
+ * 其余按工作空间解析;没有工作空间时退回应用当前目录(即没这功能之前的行为)。
+ *
+ * outside 用 resolve + relative 的**纯文本**判断,不引 fs.realpath:
+ * macOS 上 `/tmp` 是 `/private/tmp` 的软链,工作空间或路径只要有一边经过软链,
+ * realpath 才认得出是同一个目录 —— 但它要为每次调用多一次 IO 和一套失败分支,
+ * 而判错的代价只是多写一行标注,不影响能不能读到文件。这个取舍值得这么换。
+ */
+export function anchor(target: string, workspace: string): Anchored {
+  const dir = workspace.trim()
+  const resolved = path.resolve(dir || process.cwd(), expandHome(target.trim()))
+  // 没选工作空间时无处可「越」,基准点是碰巧的进程目录,标出来只会误导
+  if (!dir) return { path: resolved, outside: false }
+  const relative = path.relative(dir, resolved)
+  return {
+    path: resolved,
+    outside: relative !== '' && (relative.startsWith('..') || path.isAbsolute(relative))
+  }
+}
+
+/** 越界时在结果末尾追加那一句;未越界原样返回 */
+export function annotate(text: string, target: Anchored, workspace: string): string {
+  if (!target.outside) return text
+  // 措辞用陈述句:只说清事实,不暗示模型「不该」访问工作空间外的路径
+  return `${text}\n\n[注:${target.path} 在本次会话的工作空间 ${workspace} 之外]`
 }
 
 /** node 的 errno 码 → 一句能照着改的中文;码不在表里就退回原始 message */

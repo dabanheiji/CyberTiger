@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import type { ChildProcess } from 'child_process'
-import { describeFsError, resolvePath } from './paths'
+import { annotate, anchor, describeFsError } from './paths'
 import type { ToolDefinition } from './types'
 
 const DEFAULT_TIMEOUT_SECONDS = 30
@@ -136,17 +136,23 @@ export const runCommandTool: ToolDefinition = {
   name: 'run_command',
   description:
     '在本机执行一条 shell 命令,返回 exit_code、实际工作目录 cwd、stdout 与 stderr。' +
-    'POSIX 下由 /bin/bash -c 执行,Windows 下由 cmd.exe 执行。工作目录由 cwd 参数决定,省略则为应用当前目录。' +
+    'POSIX 下由 /bin/bash -c 执行,Windows 下由 cmd.exe 执行。' +
+    '工作目录由 cwd 参数决定:可以是绝对路径、以 ~ 开头的路径,或相对本次会话工作空间的路径;' +
+    '省略则为该工作空间(未设置工作空间时是应用当前目录)。' +
     '命令超过 timeout_seconds(默认 30 秒,最长 600 秒)或被中止时,进程连同它自己起的子进程一起被终止,' +
     '已产出的输出仍会返回。stdout 与 stderr 各保留末尾 16000 字符,更早的部分会标明已省略。' +
-    '命令在本机真实执行,没有沙箱;需要输入内容的交互式命令不适用(stdin 已关闭)。',
+    '命令在本机真实执行,没有沙箱;需要输入内容的交互式命令不适用(stdin 已关闭)。' +
+    '实际 cwd 落在工作空间之外时,结果末尾会附带一条说明。',
   // 不标 volatile:命令的结果常常是后续步骤要用的上下文(读到的清单、构建输出),
   // 每条都当过期会让多步任务反复重跑同一条命令。
   parameters: {
     type: 'object',
     properties: {
       command: { type: 'string', description: '要执行的完整命令行' },
-      cwd: { type: 'string', description: '工作目录,绝对路径或 ~ 开头;省略则用应用当前目录' },
+      cwd: {
+        type: 'string',
+        description: '工作目录:绝对路径、~ 开头,或相对本次会话工作空间;省略则用该工作空间'
+      },
       timeout_seconds: {
         type: 'number',
         description: `命令的超时秒数,默认 ${DEFAULT_TIMEOUT_SECONDS},最长 ${MAX_TIMEOUT_SECONDS}`
@@ -157,8 +163,10 @@ export const runCommandTool: ToolDefinition = {
   execute: async (args, context): Promise<string> => {
     const command = String(args.command ?? '').trim()
     if (!command) throw new Error('缺少 command')
-    const cwdArg = typeof args.cwd === 'string' ? args.cwd.trim() : ''
-    const cwd = cwdArg ? resolvePath(cwdArg) : process.cwd()
+    const workspace = context.workspace ?? ''
+    const cwdArg = typeof args.cwd === 'string' ? args.cwd : ''
+    const target = anchor(cwdArg, workspace)
+    const cwd = target.path
     const timeoutSeconds = timeoutSecondsOf(args.timeout_seconds)
     if (context.signal?.aborted) throw new Error('本轮已被中止,命令没有执行')
 
@@ -181,6 +189,6 @@ export const runCommandTool: ToolDefinition = {
       '',
       formatStream('stderr', run.stderr)
     )
-    return lines.join('\n')
+    return annotate(lines.join('\n'), target, workspace)
   }
 }

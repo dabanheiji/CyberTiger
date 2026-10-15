@@ -72,7 +72,7 @@ describe('补列迁移', () => {
     ])
   })
 
-  it('老会话表补出摘要三列,旧行读到的是空串而不是 null', () => {
+  it('老会话表补出摘要三列与工作空间列,旧行读到的是空串而不是 null', () => {
     legacyDb()
     db.prepare("INSERT INTO conversations (id, title) VALUES ('c1', '老会话')").run()
     runColumnMigrations(asMigrationDb(db))
@@ -83,16 +83,19 @@ describe('补列迁移', () => {
       'updated_at',
       'summary',
       'summary_until',
-      'summary_usage'
+      'summary_usage',
+      'workspace'
     ])
     expect(db.prepare('SELECT * FROM conversations').get()).toMatchObject({
       summary: '',
       summary_until: '',
-      summary_usage: ''
+      summary_usage: '',
+      // 空串即「没选工作空间」:工具据此退回应用当前目录,与加这列之前一致
+      workspace: ''
     })
     // 再跑一次不报错也不重复加列(启动时迁移每次都会跑)
     runColumnMigrations(asMigrationDb(db))
-    expect(columnNames(db, 'conversations')).toHaveLength(7)
+    expect(columnNames(db, 'conversations')).toHaveLength(8)
   })
 
   it('旧行迁移后读到的是各自列的默认值', () => {

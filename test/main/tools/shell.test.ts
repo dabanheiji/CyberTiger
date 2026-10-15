@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { runCommandTool } from '../../../src/main/tools/shell'
 import { createToolRunner } from '../../../src/main/tools/registry'
@@ -63,6 +64,48 @@ describe('run_command 的结果', () => {
   it('不接参数的 cat 不会拖到超时:stdin 是关闭的,读输入的进程拿不到管道', async () => {
     const res = await run({ command: 'cat', timeout_seconds: 5 })
     expect(res.result).toContain('exit_code: 0')
+  })
+})
+
+describe('run_command 的工作空间', () => {
+  it('省略 cwd 时就在会话的工作空间里执行:这是"选了目录后命令默认在那儿跑"的兑现', async () => {
+    const res = await run(
+      { command: nodeEval('console.log(1)') },
+      { callId: 'call-ws', workspace: root }
+    )
+    expect(res.result).toContain(`cwd: ${root}`)
+    // 工作空间本身不算越界,不该多出那句提示
+    expect(res.result).not.toContain('之外')
+  })
+
+  it('相对 cwd 按工作空间解析,而不是应用当前目录', async () => {
+    fs.mkdirSync(path.join(root, 'sub/dir'), { recursive: true })
+    const res = await run(
+      { command: nodeEval('console.log(1)'), cwd: 'sub/dir' },
+      { callId: 'call-ws', workspace: root }
+    )
+    expect(res.result).toContain(`cwd: ${path.join(root, 'sub', 'dir')}`)
+  })
+
+  it('显式指定工作空间之外的 cwd 照样执行,并在结果末尾标注:放开作用域但要说清', async () => {
+    const outside = makeTempDir()
+    try {
+      const res = await run(
+        { command: nodeEval("console.log('hi')"), cwd: outside },
+        { callId: 'call-ws', workspace: root }
+      )
+      expect(res.ok).toBe(true)
+      expect(res.result).toContain(`cwd: ${outside}`)
+      expect(res.result).toContain(`在本次会话的工作空间 ${root} 之外`)
+    } finally {
+      removeTempDir(outside)
+    }
+  })
+
+  it('没设工作空间时省略 cwd 落在应用当前目录,并且不提工作空间', async () => {
+    const res = await run({ command: nodeEval('console.log(1)') })
+    expect(res.result).toContain(`cwd: ${process.cwd()}`)
+    expect(res.result).not.toContain('工作空间')
   })
 })
 

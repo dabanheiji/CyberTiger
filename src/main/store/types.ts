@@ -71,6 +71,13 @@ export interface AppSettings {
   disabledSkills?: string[]
   /** 已禁用的自定义子 Agent 角色名 */
   disabledAgents?: string[]
+  /**
+   * 新建会话默认使用的工作空间目录:草稿态(还没建会话)在选择器里挑的目录先落这里,
+   * 首条消息建会话时由 service 抄进 conversations.workspace。已有会话一律读自己那一列。
+   */
+  defaultWorkspace?: string
+  /** 最近用过的工作空间,最新在前;渲染层在选择器里列出来,点击即可切换 */
+  workspaceRecent?: string[]
   /** 是否允许主 Agent 派生子 Agent;未设置视为允许 */
   enableSubAgent?: boolean
   /**

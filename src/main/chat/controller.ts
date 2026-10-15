@@ -1,4 +1,4 @@
-import type { IpcMainInvokeEvent } from 'electron'
+import { BrowserWindow, dialog, type IpcMainInvokeEvent } from 'electron'
 import {
   createFirstMessage,
   listConversations,
@@ -8,7 +8,9 @@ import {
   removeConversation as removeConversationService,
   generateReply as generateReplyService,
   abortReply as abortReplyService,
-  compactConversationManually
+  compactConversationManually,
+  hasActiveWork,
+  setConversationWorkspace
 } from './service'
 import type {
   createFirstMessageDto,
@@ -16,6 +18,7 @@ import type {
   renameConversationDto,
   generateReplyDto,
   compactDto,
+  setWorkspaceDto,
   ChatStreamEvent,
   CompactReport,
   IpcResult
@@ -110,4 +113,38 @@ export async function compactContext(
   } catch (error) {
     return { success: false, msg: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/** 弹系统对话框选工作空间目录;用户取消时 data 为 null,界面据此什么都不改 */
+export async function pickWorkspace(e: IpcMainInvokeEvent): Promise<IpcResult<string | null>> {
+  try {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    const options: Electron.OpenDialogOptions = {
+      title: '选择工作空间',
+      properties: ['openDirectory', 'createDirectory']
+    }
+    const result = win
+      ? await dialog.showOpenDialog(win, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return { success: true, data: null }
+    return { success: true, data: result.filePaths[0] }
+  } catch (error) {
+    return { success: false, msg: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * 切换会话的工作空间。
+ *
+ * 拒掉正在 run 的会话:`startRun` 已把目录固定进那一轮,而工具正在按它解析相对路径 ——
+ * 中途改写会让「上一秒的路径」和「下一秒的路径」指向不同目录,父子 run 还会分到两个基准。
+ */
+export function setWorkspace(_e: IpcMainInvokeEvent, dto: setWorkspaceDto): IpcResult<null> {
+  return run(() => {
+    if (hasActiveWork(dto.conversationId)) {
+      throw new Error('这一轮还在进行中,请等它结束或先点击停止')
+    }
+    setConversationWorkspace(dto.conversationId, dto.dir)
+    return null
+  })
 }

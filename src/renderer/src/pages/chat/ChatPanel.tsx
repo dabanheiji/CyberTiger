@@ -2,8 +2,11 @@ import { useState } from 'react'
 import { Bubble, Sender, Suggestion, Welcome } from '@ant-design/x'
 import type { BubbleListProps } from '@ant-design/x'
 import XMarkdown from '@ant-design/x-markdown'
-import { Avatar, Button, Flex, Popover, Progress, Select, Space, Tag, theme } from 'antd'
+import { Avatar, Button, Dropdown, Flex, Popover, Progress, Select, Space, Tag, theme } from 'antd'
+import type { MenuProps } from 'antd'
 import {
+  FolderOpenOutlined,
+  FolderOutlined,
   RobotOutlined,
   SettingOutlined,
   ThunderboltOutlined,
@@ -15,6 +18,7 @@ import { contextWindowOf } from '../../../../main/store/modelRef'
 import { budgetFor } from '../../../../main/agent/context'
 import { formatTokens } from '../../../../main/tokens/estimate'
 import { modelKey, parseModelKey } from '../../lib/modelRef'
+import { workspaceLabel } from '../../lib/workspace'
 import { contextUsage, usageLevel, type ContextUsage } from '../../lib/contextUsage'
 import type { AgentStep, StreamingRun, StreamingToolCall } from '../../hooks/useAgentStream'
 import { attachToolResult, finalizeStep, findCall, toStepUsage } from '../../lib/agentSteps'
@@ -51,6 +55,10 @@ interface ChatPanelProps {
   currentRef?: ModelRef
   /** 手动压缩在等 IPC 返回 */
   compacting: boolean
+  /** 当前会话的工作空间目录;空串表示未选(工具按应用当前目录执行) */
+  workspace: string
+  /** 最近用过的工作空间,最新在前 */
+  recentWorkspaces: string[]
   /** skillName 为通过 / 选择的 skill,未选择时为 undefined */
   onSend: (content: string, skillName?: string) => void
   /** 用户点击停止按钮 */
@@ -59,6 +67,12 @@ interface ChatPanelProps {
   onCompact: () => void
   onModelChange: (ref: ModelRef) => void
   onOpenSettings: () => void
+  /** 点「选择文件夹…」:由父层弹系统对话框 */
+  onPickWorkspace: () => void
+  /** 从下拉里选一个目录(含最近使用) */
+  onSelectWorkspace: (dir: string) => void
+  /** 清除当前工作空间 */
+  onClearWorkspace: () => void
 }
 
 /** 一步是否还没有任何产出 */
@@ -236,6 +250,84 @@ function ContextRing({ usage, busy, compacting, onCompact }: ContextRingProps): 
   )
 }
 
+interface WorkspacePickerProps {
+  workspace: string
+  recent: string[]
+  disabled: boolean
+  onPick: () => void
+  onSelect: (dir: string) => void
+  onClear: () => void
+}
+
+/** 下拉里两个非目录项的 key:真实目录都是绝对路径,不会与这两个串撞车 */
+const PICK_KEY = '__pick__'
+const CLEAR_KEY = '__clear__'
+
+/**
+ * 底栏的工作空间选择器:一眼看到当前会话在哪个目录里干活,点击即可换。
+ *
+ * 完整路径放在下拉的第一行(禁用项)而不是 Tooltip 里:Tooltip 与 Dropdown 套同一个子元素
+ * 要操心 ref 转发,而下拉本来就要打开,顺手把全路径写在那儿更省事。
+ */
+function WorkspacePicker({
+  workspace,
+  recent,
+  disabled,
+  onPick,
+  onSelect,
+  onClear
+}: WorkspacePickerProps): React.JSX.Element {
+  const items: NonNullable<MenuProps['items']> = [
+    {
+      key: '__current__',
+      disabled: true,
+      label: workspace || '未选择:文件与命令按应用当前目录执行'
+    },
+    { type: 'divider' },
+    { key: PICK_KEY, icon: <FolderOpenOutlined />, label: '选择文件夹…' }
+  ]
+  // 当前目录不再重复出现在最近列表里(它已经写在第一行)
+  const shown = recent.filter((dir) => dir && dir !== workspace).slice(0, 5)
+  if (shown.length > 0) {
+    items.push({ type: 'divider' })
+    for (const dir of shown) items.push({ key: dir, icon: <FolderOutlined />, label: dir })
+  }
+  if (workspace) {
+    items.push({ type: 'divider' })
+    items.push({ key: CLEAR_KEY, label: '清除工作空间' })
+  }
+
+  return (
+    <Dropdown
+      trigger={['click']}
+      disabled={disabled}
+      menu={{
+        items,
+        onClick: ({ key }) => {
+          if (key === PICK_KEY) onPick()
+          else if (key === CLEAR_KEY) onClear()
+          else onSelect(key)
+        }
+      }}
+    >
+      <Button size="small" type="text" icon={<FolderOutlined />} disabled={disabled}>
+        {/* 长目录名会把底栏挤变形,超出宽度只留末段并截断 */}
+        <span
+          style={{
+            maxWidth: 140,
+            overflow: 'hidden',
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
+            verticalAlign: 'bottom'
+          }}
+        >
+          {workspaceLabel(workspace)}
+        </span>
+      </Button>
+    </Dropdown>
+  )
+}
+
 function ChatPanel({
   messages,
   streaming,
@@ -244,11 +336,16 @@ function ChatPanel({
   providers,
   currentRef,
   compacting,
+  workspace,
+  recentWorkspaces,
   onSend,
   onCancel,
   onCompact,
   onModelChange,
-  onOpenSettings
+  onOpenSettings,
+  onPickWorkspace,
+  onSelectWorkspace,
+  onClearWorkspace
 }: ChatPanelProps): React.JSX.Element {
   const { token } = theme.useToken()
   const [value, setValue] = useState('')
@@ -427,6 +524,15 @@ function ChatPanel({
               footer={(actions) => (
                 <Flex justify="space-between" align="center">
                   <Space align="center" size={8}>
+                    <WorkspacePicker
+                      workspace={workspace}
+                      recent={recentWorkspaces}
+                      // 与主进程的守卫一致:一个 run 的目录在 startRun 就固定,跑途中不让换
+                      disabled={sending}
+                      onPick={onPickWorkspace}
+                      onSelect={onSelectWorkspace}
+                      onClear={onClearWorkspace}
+                    />
                     {selectable.length > 0 ? (
                       <Select<string>
                         size="small"

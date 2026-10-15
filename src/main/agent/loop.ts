@@ -177,6 +177,12 @@ export interface RunAgentParams {
   history: ChatCompletionMessage[]
   /** 本次 run 可用的工具集合(含查找与执行) */
   runner: ToolRunner
+  /**
+   * 本次会话的工作空间目录;空表示用户没选。
+   * 在 startRun 读一次并随整轮固定:相对路径的解析基准与 shell 的缺省 cwd 都靠它,
+   * 中途换目录会让上一轮已发出的相对路径变成另一套含义。父子 run 传同一份。
+   */
+  workspace?: string
   /** 步数上限;子 agent 通常小于主 agent */
   maxSteps: number
   store: AgentStore
@@ -354,7 +360,11 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
         const cached = toolCache.get(key)
         const exec =
           cached ??
-          (await params.runner.execute(call.name, call.arguments, { callId: call.id, signal }))
+          (await params.runner.execute(call.name, call.arguments, {
+            callId: call.id,
+            signal,
+            workspace: params.workspace
+          }))
         if (!cached) toolCache.set(key, exec)
         const toolMessageId = store.addToolMessage(scope, call.id, exec.result)
         emit({

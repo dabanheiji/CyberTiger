@@ -5,7 +5,7 @@ import { skillRegistry } from '../skills/registry'
 import { replaceArguments } from '../skills/parser'
 import { agentRegistry } from '../agents/registry'
 import { store } from '../store'
-import { SYSTEM_PROMPT } from './prompt'
+import { SYSTEM_PROMPT, workspaceNote } from './prompt'
 import { summaryBlock } from './compact'
 import type { IdentifiedMessage } from './turns'
 
@@ -117,11 +117,17 @@ export function toIdentifiedMessages(
 }
 
 /**
- * 主 Agent 的 system prompt(含 skill 与子 Agent 目录)。
+ * 主 Agent 的 system prompt(含工作空间说明与 skill / 子 Agent 目录)。
  * 单独导出是为了让「历史正文」与「这份开头」能由调用方自己拼,而不是多算一遍目录。
+ *
+ * workspace 排在这些目录之前:一个 run 的工作空间在 startRun 就固定,
+ * 所以这段文字在整轮里是常量,而 skill 目录可能中途被用户启停。
  */
-export function systemPromptMessage(): ChatCompletionMessage {
-  return { role: 'system', content: SYSTEM_PROMPT + skillsCatalog() + agentsCatalog() }
+export function systemPromptMessage(workspace = ''): ChatCompletionMessage {
+  return {
+    role: 'system',
+    content: SYSTEM_PROMPT + workspaceNote(workspace) + skillsCatalog() + agentsCatalog()
+  }
 }
 
 /**
@@ -148,10 +154,11 @@ export function historyBody(items: IdentifiedMessage[], summary = ''): ChatCompl
 export function buildHistory(
   messages: Message[],
   definitions: ToolDefinition[],
-  summary = ''
+  summary = '',
+  workspace = ''
 ): ChatCompletionMessage[] {
   return [
-    systemPromptMessage(),
+    systemPromptMessage(workspace),
     ...historyBody(toIdentifiedMessages(messages, definitions), summary)
   ]
 }

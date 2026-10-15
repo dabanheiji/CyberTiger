@@ -38,6 +38,8 @@ interface RunOptions {
   budget?: ContextBudget
   /** run 中途压缩的注入点;不传即子 Agent 那种「不压缩」的 run */
   compaction?: RunAgentParams['compaction']
+  /** 会话的工作空间:必须原样送到每次工具调用的上下文里 */
+  workspace?: string
 }
 
 interface RunOutcome {
@@ -62,6 +64,7 @@ async function run(options: RunOptions = {}): Promise<RunOutcome> {
     store,
     emit,
     ...(options.budget ? { budget: options.budget } : {}),
+    ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
     ...(options.compaction ? { compaction: options.compaction } : {}),
     stream: options.stream ?? model.stream
   })
@@ -388,6 +391,46 @@ describe('步数上限', () => {
     const { requests } = await run({ maxSteps: 0, script: [{ content: '直接答' }] })
     expect(requests.length).toBe(1)
     expect(requests[0].tools).toBeUndefined()
+  })
+})
+
+describe('工作空间', () => {
+  it('runAgent 收到的 workspace 原样进每次工具调用的上下文', async () => {
+    const seen: (string | undefined)[] = []
+    const probe: TestTool = {
+      executed: [],
+      run: (_args, context) => {
+        seen.push(context.workspace)
+        return '结果'
+      }
+    }
+    await run({
+      workspace: '/ws/shop',
+      // 参数各不同:同名同参会命中本轮去重,第二次根本不执行,那就测不到"每次调用"
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'a1'), makeCall('probe', '{"i":2}', 'a2')] },
+        { content: '完成' }
+      ],
+      tools: { probe }
+    })
+    // 相对路径的基准与 shell 的缺省 cwd 都取自它,少传一步就是工具在应用目录下乱跑
+    expect(seen).toEqual(['/ws/shop', '/ws/shop'])
+  })
+
+  it('没传 workspace 时上下文里是 undefined,而不是空串冒充已设置', async () => {
+    let received: string | undefined = 'initial'
+    const probe: TestTool = {
+      executed: [],
+      run: (_args, context) => {
+        received = context.workspace
+        return '结果'
+      }
+    }
+    await run({
+      script: [{ toolCalls: [makeCall('probe', '{}')], content: '' }, { content: '好' }],
+      tools: { probe }
+    })
+    expect(received).toBeUndefined()
   })
 })
 

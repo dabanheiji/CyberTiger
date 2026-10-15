@@ -46,6 +46,7 @@ import {
   systemPromptMessage,
   toIdentifiedMessages
 } from '../agent/history'
+import { workspaceNote } from '../agent/prompt'
 import {
   createTaskTool,
   TASK_TOOL_NAME,
@@ -185,6 +186,28 @@ export function getSummaryState(conversationId: string): SummaryState {
 }
 
 /**
+ * 会话的工作空间目录;没选(或会话不存在)返回空串 —— 工具据此退回应用当前目录。
+ * 一个 run 只在 startRun 读一次,好让整轮的相对路径落在同一个目录上。
+ */
+export function getWorkspace(conversationId: string): string {
+  const row = getDb()
+    .prepare<[string], { workspace: string }>(chatSql.conversations.workspace)
+    .get(conversationId)
+  return row?.workspace ?? ''
+}
+
+/**
+ * 设置会话的工作空间。
+ * 与摘要一样不动 updated_at:换目录不是对话活动,不该把会话顶到列表最前。
+ */
+export function setConversationWorkspace(
+  conversationId: string,
+  workspace: string
+): Database.RunResult {
+  return getDb().prepare(chatSql.conversations.setWorkspace).run(workspace.trim(), conversationId)
+}
+
+/**
  * 水位之后的顶层行:压缩后发给模型的那段历史(不含子 agent 的嵌套行)。
  * 没有水位时这条 SQL 退化成全量顶层行,所以调用方不需要分支。
  */
@@ -295,11 +318,12 @@ async function compactUnits(
 function fixedSizing(
   definitions: ToolDefinition[],
   contextWindow: number | undefined,
-  summary: string
+  summary: string,
+  workspace: string
 ): CompactSizing {
   const tools = createToolRunner(definitions).toChatCompletionTools()
   return {
-    fixedTokens: estimateRequestTokens(buildHistory([], definitions), tools),
+    fixedTokens: estimateRequestTokens(buildHistory([], definitions, '', workspace), tools),
     summaryTokens: estimateTextTokens(summary),
     // 压缩的比例全部相对「模型配置的窗口」,不是相对裁剪后的额度
     window: budgetFor(contextWindow).window
@@ -309,8 +333,11 @@ function fixedSizing(
 /** 正在压缩中的会话:同一会话同时只允许一次压缩 */
 const compacting = new Set<string>()
 
-/** 该会话是否有进行中的 run 或压缩;手动压缩只在两皆无时才允许 */
-function hasActiveWork(conversationId: string): boolean {
+/**
+ * 该会话是否有进行中的 run 或压缩;手动压缩与切换工作空间都只在两皆无时才允许。
+ * 两者都在推进会话级的状态(水位 / 相对路径基准),与正在跑的 run 并发会互相踩出错误结果。
+ */
+export function hasActiveWork(conversationId: string): boolean {
   if (compacting.has(conversationId)) return true
   for (const run of activeRuns.values()) {
     if (run.conversationId === conversationId) return true
@@ -326,7 +353,7 @@ async function compactBeforeRun(
   target: CompactTarget,
   conversationId: string,
   definitions: ToolDefinition[],
-  options: { force: boolean; summary: string; contextWindow?: number }
+  options: { force: boolean; summary: string; contextWindow?: number; workspace: string }
 ): Promise<UnitCompactResult> {
   const messages = listMessagesAfterWatermark(conversationId)
   const units = toCompactUnits(toIdentifiedMessages(messages, definitions))
@@ -334,7 +361,7 @@ async function compactBeforeRun(
     target,
     conversationId,
     units,
-    fixedSizing(definitions, options.contextWindow, options.summary),
+    fixedSizing(definitions, options.contextWindow, options.summary, options.workspace),
     { force: options.force, summary: options.summary }
   )
 }
@@ -407,7 +434,12 @@ export async function compactConversationManually(dto: compactDto): Promise<Comp
       },
       dto.conversationId,
       getAllTools(),
-      { force: true, summary, contextWindow: connection.contextWindow }
+      {
+        force: true,
+        summary,
+        contextWindow: connection.contextWindow,
+        workspace: getWorkspace(dto.conversationId)
+      }
     )
     return toReport(result)
   } finally {
@@ -435,9 +467,13 @@ export function createFirstMessage(dto: createFirstMessageDto): string {
   const messageId = uuidv4()
 
   const title = dto.content.length > 20 ? dto.content.substring(0, 20) + '...' : dto.content
+  // 草稿期选好的工作空间随新会话一起落库:此后每次 run 只读会话那一列,
+  // 全局那个值只是「下一段新对话用什么」的待用值,不参与已有会话
+  const workspace = (store.get('defaultWorkspace') ?? '').trim()
 
   const createChat = getDb().transaction(() => {
     createConversation(conversationId, title)
+    if (workspace) setConversationWorkspace(conversationId, workspace)
     createMessage(messageId, conversationId, 'user', dto.content, dto.skill ?? '')
   })
 
@@ -540,6 +576,11 @@ interface SpawnerContext {
   signal: AbortSignal
   /** 主 agent 的可用工具,子 agent 在此基础上裁剪 */
   parentTools: ToolDefinition[]
+  /**
+   * 父级本次 run 的工作空间,子 Agent 整套继承:主 agent 给的相对路径就是相对这个目录,
+   * 两边基准不同会让子 Agent 读到别的文件,而它回传的结论父级无从校验。
+   */
+  workspace: string
   emit: (event: ChatStreamEvent) => void
 }
 
@@ -597,10 +638,18 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
       // 复用父级 signal:用户停止或删除会话时父子一起停
       signal: ctx.signal,
       history: [
-        { role: 'system', content: role.systemPrompt + (canLoadSkills ? skillsCatalog() : '') },
+        {
+          role: 'system',
+          content:
+            role.systemPrompt +
+            workspaceNote(ctx.workspace) +
+            (canLoadSkills ? skillsCatalog() : '')
+        },
         { role: 'user', content: req.prompt }
       ],
       runner,
+      // 与父级同一个目录:主 Agent 派任务时写的相对路径就是这个目录
+      workspace: ctx.workspace,
       maxSteps: SUB_AGENT_MAX_STEPS,
       store: agentStore,
       emit: ctx.emit,
@@ -682,6 +731,9 @@ interface StartRunInput {
 async function startRun(input: StartRunInput): Promise<void> {
   const { conversationId, scope, connection, signal, emit } = input
   const { baseUrl, apiKey, model, contextWindow } = connection
+  // 工作空间在 run 开始前读一次并随整轮带走:中途改设置不影响这一轮,
+  // 而且相对路径的基准必须在整轮里稳定,否则上一条工具结果指的文件会换含义
+  const workspace = getWorkspace(conversationId)
   // 工具快照在 run 开始时固定,保证本次 run 的执行范围与发给模型的列表严格一致
   const definitions = getAllTools()
 
@@ -696,6 +748,7 @@ async function startRun(input: StartRunInput): Promise<void> {
           parentRef: input.ref,
           signal,
           parentTools: definitions,
+          workspace,
           emit
         }),
         // 与 system prompt 里的角色目录取同一份名单,保证 schema 与提示词一致
@@ -710,7 +763,8 @@ async function startRun(input: StartRunInput): Promise<void> {
   const report = await compactBeforeRun({ baseUrl, apiKey, model, signal }, conversationId, tools, {
     force: false,
     summary,
-    contextWindow
+    contextWindow,
+    workspace
   })
   // 只有真调过模型才发事件:被计划拒绝时没有任何账目可展示
   if (report.usage) {
@@ -731,7 +785,7 @@ async function startRun(input: StartRunInput): Promise<void> {
   // id 与消息取自同一次转换:loop 中途压缩要把水位落在 id 上,两者必须一一对齐
   const items = toIdentifiedMessages(messages, tools)
   const current = getSummaryState(conversationId).summary
-  const history = [systemPromptMessage(), ...historyBody(items, current)]
+  const history = [systemPromptMessage(workspace), ...historyBody(items, current)]
 
   await runAgent({
     scope,
@@ -740,6 +794,7 @@ async function startRun(input: StartRunInput): Promise<void> {
     model,
     signal,
     history,
+    workspace,
     runner: createToolRunner(tools),
     maxSteps: MAIN_AGENT_MAX_STEPS,
     // 窗口跟着本次解析出的连接走:换服务商 / 换模型都自动跟着变,不再依赖一个全局值

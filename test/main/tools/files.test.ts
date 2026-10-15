@@ -32,6 +32,11 @@ function write(args: Record<string, unknown>): Promise<ToolExecResult> {
   return runner.execute('write_file', JSON.stringify(args), ctx)
 }
 
+/** 带工作空间的调用:临时目录每例都换,所以 ctx 必须现造 */
+function inWorkspace(dir: string): { callId: string; workspace: string } {
+  return { callId: 'call-ws', workspace: dir }
+}
+
 describe('read_file', () => {
   it('小文件给出原文与「路径:行数」的一行说明,正文不带行号', async () => {
     fs.writeFileSync(file('a.md'), '# 标题\n第二行\n', 'utf8')
@@ -155,6 +160,66 @@ describe('write_file', () => {
     const res = await write({ path: file('cn.txt'), content })
     expect(res.result).toContain(`${Buffer.byteLength(content)} B`)
     expect(Buffer.byteLength(content)).toBe(24)
+  })
+})
+
+describe('工作空间', () => {
+  it('给了工作空间后相对路径就在其中读写:模型不必知道应用的进程目录', async () => {
+    fs.writeFileSync(file('notes.md'), '# 工作空间里的笔记\n', 'utf8')
+    const res = await runner.execute(
+      'read_file',
+      JSON.stringify({ path: 'notes.md' }),
+      inWorkspace(root)
+    )
+    expect(res.ok).toBe(true)
+    expect(res.result).toContain('# 工作空间里的笔记')
+    expect(res.result).toContain(file('notes.md'))
+  })
+
+  it('写也是同一个基准:相对路径写出的文件落在工作空间里', async () => {
+    const res = await runner.execute(
+      'write_file',
+      JSON.stringify({ path: 'out/report.md', content: '# 结果\n' }),
+      inWorkspace(root)
+    )
+    expect(res.ok).toBe(true)
+    expect(fs.readFileSync(path.join(root, 'out/report.md'), 'utf8')).toBe('# 结果\n')
+  })
+
+  it('绝对路径仍可读写,但结果里标注它在工作空间之外:放开作用域不等于悄悄越过', async () => {
+    const outside = makeTempDir()
+    try {
+      fs.writeFileSync(path.join(outside, 'a.txt'), '在外面\n', 'utf8')
+      const res = await runner.execute(
+        'read_file',
+        JSON.stringify({ path: path.join(outside, 'a.txt') }),
+        inWorkspace(root)
+      )
+      expect(res.ok).toBe(true)
+      expect(res.result).toContain('在外面')
+      expect(res.result).toContain('在本次会话的工作空间')
+      expect(res.result).toContain(root)
+    } finally {
+      removeTempDir(outside)
+    }
+  })
+
+  it('工作空间内的绝对路径不加那句标注:每次都提示越界会变成噪声', async () => {
+    fs.writeFileSync(file('b.txt'), '在里面\n', 'utf8')
+    const res = await runner.execute(
+      'read_file',
+      JSON.stringify({ path: file('b.txt') }),
+      inWorkspace(root)
+    )
+    expect(res.result).not.toContain('工作空间')
+  })
+
+  it('没选工作空间时退回应用当前目录,并且不提工作空间:那才是它真实落点', async () => {
+    const ghost = 'cybertiger-no-such-file-under-cwd.md'
+    const res = await runner.execute('read_file', JSON.stringify({ path: ghost }), ctx)
+    expect(res.ok).toBe(false)
+    expect(res.result).toContain(path.resolve(process.cwd(), ghost))
+    expect(res.result).not.toContain('工作空间')
   })
 })
 

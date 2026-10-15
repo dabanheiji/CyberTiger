@@ -9,6 +9,8 @@ export interface Conversation {
   summary_until: string
   /** 上次压缩的账目 JSON(SummaryMetrics);空串表示没有 */
   summary_usage: string
+  /** 会话级工作空间目录;空串表示未选择,工具按应用当前目录解析相对路径 */
+  workspace: string
   created_at: string
   updated_at: string
 }
@@ -60,6 +62,15 @@ export const chatSql = {
      */
     setSummary:
       'UPDATE conversations SET summary = ?, summary_until = ?, summary_usage = ? WHERE id = ?',
+    /**
+     * 工作空间只有读一列的场合(每次 run 开始时固定一次 cwd),不必拉整行。
+     */
+    workspace: 'SELECT workspace FROM conversations WHERE id = ?',
+    /**
+     * 切换会话的工作空间。
+     * 与 setSummary 同样不动 updated_at —— 换个目录不是对话活动,不该把会话顶到列表最前。
+     */
+    setWorkspace: 'UPDATE conversations SET workspace = ? WHERE id = ?',
     remove: 'DELETE FROM conversations WHERE id = ?',
     resort: 'UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?'
   },

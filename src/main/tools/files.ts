@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import { describeFsError, resolvePath, statIfExists } from './paths'
+import { annotate, anchor, describeFsError, statIfExists } from './paths'
 import type { ToolDefinition } from './types'
 
 /**
@@ -38,10 +38,12 @@ function offsetOf(value: unknown): number {
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
   description:
-    '读取一个文本文件,返回不带行号的原文。路径可以是绝对路径、以 ~ 开头的路径,或相对应用当前目录的路径;' +
+    '读取一个文本文件,返回不带行号的原文。路径可以是绝对路径、以 ~ 开头的路径,' +
+    '或相对本次会话工作空间的路径(未设置工作空间时相对应用当前目录);' +
     '结尾会写明实际读取的绝对路径与行数。' +
     '文件较长时只返回从 offset 行起的一段,并说明已读到第几行、下一段该从哪行继续。' +
-    "只处理文本:二进制文件,以及超过 2 MB 的大文件会被拒绝,后者改用 run_command 按行取片段(如 sed -n '1,200p')。",
+    "只处理文本:二进制文件,以及超过 2 MB 的大文件会被拒绝,后者改用 run_command 按行取片段(如 sed -n '1,200p')。" +
+    '解析出的路径若在工作空间之外,结果末尾会附带一条说明。',
   parameters: {
     type: 'object',
     properties: {
@@ -50,10 +52,12 @@ export const readFileTool: ToolDefinition = {
     },
     required: ['path']
   },
-  execute: async (args): Promise<string> => {
+  execute: async (args, context): Promise<string> => {
     const raw = String(args.path ?? '').trim()
     if (!raw) throw new Error('缺少 path')
-    const filePath = resolvePath(raw)
+    const workspace = context.workspace ?? ''
+    const target = anchor(raw, workspace)
+    const filePath = target.path
     const start = offsetOf(args.offset)
 
     let stat: fs.Stats
@@ -79,7 +83,7 @@ export const readFileTool: ToolDefinition = {
     if (looksBinary(buffer)) {
       throw new Error(`${filePath} 看起来是二进制文件(开头出现了 NUL 字节),本工具只读文本`)
     }
-    if (buffer.length === 0) return `${filePath} 是空文件(0 字节)`
+    if (buffer.length === 0) return annotate(`${filePath} 是空文件(0 字节)`, target, workspace)
 
     const lines = buffer.toString('utf8').split('\n')
     if (start > lines.length) {
@@ -109,7 +113,7 @@ export const readFileTool: ToolDefinition = {
         : `${filePath} 共 ${lines.length} 行,本次返回第 ${start}-${end} 行` +
           (lineCut ? '(该行本身超过上限,已按字符截断)' : '') +
           (reachedEnd ? '' : `;继续读把 offset 设为 ${end + 1}`)
-    return `${body}\n\n---\n[${note}]`
+    return annotate(`${body}\n\n---\n[${note}]`, target, workspace)
   }
 }
 
@@ -117,10 +121,12 @@ export const writeFileTool: ToolDefinition = {
   name: 'write_file',
   description:
     '把一份完整文本写入文件:默认整文件覆盖(旧内容不保留),append=true 时追加到末尾;' +
-    '父目录不存在会自动创建。路径支持绝对路径与 ~ 开头,返回值写明实际写入的绝对路径、' +
+    '父目录不存在会自动创建。路径支持绝对路径、以 ~ 开头的路径,以及相对本次会话工作空间的路径' +
+    '(未设置工作空间时相对应用当前目录),返回值写明实际写入的绝对路径、' +
     '写入字节数,以及覆盖模式下原先有多大内容。' +
     'content 是整份正文且必填,缺省时调用直接被拒绝 —— 那等于把文件清空。' +
-    '二进制文件(图片、压缩包等)不用本工具。',
+    '二进制文件(图片、压缩包等)不用本工具。' +
+    '解析出的路径若在工作空间之外,结果末尾会附带一条说明。',
   parameters: {
     type: 'object',
     properties: {
@@ -130,13 +136,15 @@ export const writeFileTool: ToolDefinition = {
     },
     required: ['path', 'content']
   },
-  execute: async (args): Promise<string> => {
+  execute: async (args, context): Promise<string> => {
     const raw = String(args.path ?? '').trim()
     if (!raw) throw new Error('缺少 path')
     if (typeof args.content !== 'string') {
       throw new Error('缺少 content:本工具写的是整份正文,少这个参数会把文件清空,所以拒绝执行')
     }
-    const filePath = resolvePath(raw)
+    const workspace = context.workspace ?? ''
+    const target = anchor(raw, workspace)
+    const filePath = target.path
     const append = args.append === true
 
     const existing = await statIfExists(filePath)
@@ -154,11 +162,19 @@ export const writeFileTool: ToolDefinition = {
 
     const written = Buffer.byteLength(args.content, 'utf8')
     if (append) {
-      return `已追加 ${formatSize(written)} 到 ${filePath}${existing ? '' : '(原本不存在,已新建)'}`
+      return annotate(
+        `已追加 ${formatSize(written)} 到 ${filePath}${existing ? '' : '(原本不存在,已新建)'}`,
+        target,
+        workspace
+      )
     }
-    return existing
-      ? `已覆盖 ${filePath} 原有的 ${formatSize(existing.size)} 内容,本次写入 ${formatSize(written)}`
-      : `已新建 ${filePath},写入 ${formatSize(written)}`
+    return annotate(
+      existing
+        ? `已覆盖 ${filePath} 原有的 ${formatSize(existing.size)} 内容,本次写入 ${formatSize(written)}`
+        : `已新建 ${filePath},写入 ${formatSize(written)}`,
+      target,
+      workspace
+    )
   }
 }
 

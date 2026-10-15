@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   summary_until TEXT NOT NULL DEFAULT '',
   -- 上次压缩的账目 JSON(SummaryMetrics),空串表示没有
   summary_usage TEXT NOT NULL DEFAULT '',
+  -- 会话级工作空间目录:文件与 shell 工具的相对路径按它解析;空串表示未选
+  workspace TEXT NOT NULL DEFAULT '',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -122,6 +124,13 @@ export const columnMigrations: { table: string; column: string; ddl: string }[] 
     table: 'conversations',
     column: 'summary_usage',
     ddl: "ALTER TABLE conversations ADD COLUMN summary_usage TEXT NOT NULL DEFAULT ''"
+  },
+  // 项目空间:每个会话各自一个目录,文件与 shell 工具据此解析相对路径。
+  // 空串即「未选择」,工具退回按应用当前目录走(与加这列之前的行为一致)。
+  {
+    table: 'conversations',
+    column: 'workspace',
+    ddl: "ALTER TABLE conversations ADD COLUMN workspace TEXT NOT NULL DEFAULT ''"
   }
 ]
 
