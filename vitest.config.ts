@@ -33,6 +33,7 @@ export default defineConfig({
         'src/main/database/{migrate,sql}.ts',
         'src/main/store/modelRef.ts',
         'src/main/agent/**',
+        'src/main/chat/questions.ts',
         'src/main/tools/registry.ts',
         'src/renderer/src/lib/**'
       ],

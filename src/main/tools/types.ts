@@ -4,7 +4,8 @@ import type OpenAI from 'openai'
 export interface ToolContext {
   /**
    * 本次工具调用的 id。
-   * task 工具靠它把派生出的子 agent 挂到"是哪一次 task 调用"下面(落库与流式事件都用)。
+   * task 工具靠它把派生出的子 agent 挂到"是哪一次 task 调用"下面(落库与流式事件都用),
+   * ask_user 靠它让渲染层在同一次调用的结果到手时收起提问卡片。
    */
   callId: string
   /**

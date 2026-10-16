@@ -4,6 +4,7 @@ import {
   ensureStep,
   finalizeStep,
   findCall,
+  isTooling,
   mapCall,
   mapStep,
   type AgentStep,
@@ -276,5 +277,72 @@ describe('ensureStep', () => {
     expect(filled[0].content).toBe('你好')
     // 没有 ensureStep 的话,这一步会永远丢掉正文
     expect(mapStep([], 'm1', (step) => ({ ...step, content: '你好' }))).toEqual([])
+  })
+})
+
+describe('isTooling:工具链该不该摊开', () => {
+  /** 一个调用;默认已完成 */
+  const call = (
+    id: string,
+    status: StreamingToolCall['status'] = 'success'
+  ): StreamingToolCall => ({
+    id,
+    name: 'read_file',
+    arguments: '{}',
+    status
+  })
+
+  it('还没有正文时摊开:这正是用户要看执行过程的那段时间', () => {
+    const steps = [{ messageId: 'm1', content: '', reasoning: '', toolCalls: [call('c1')] }]
+    expect(isTooling(steps, true)).toBe(true)
+  })
+
+  it('一步都没产出时也摊开:子 Agent 刚跑起来、正文与调用都还没落下来', () => {
+    expect(isTooling([emptyStep('m1')], true)).toBe(true)
+    expect(isTooling([], true)).toBe(true)
+  })
+
+  it('正文开始输出就收起:工具链继续摊着会把回答挤到下面,看着像还在干活', () => {
+    const steps = [{ messageId: 'm2', content: '结论是', reasoning: '', toolCalls: [call('c1')] }]
+    expect(isTooling(steps, true)).toBe(false)
+  })
+
+  it('有正文但还有调用在跑时不收起:模型动手前那句「我来看看 X」不是开始回答', () => {
+    const steps = [
+      {
+        messageId: 'm3',
+        content: '我先读一下配置文件。',
+        reasoning: '',
+        toolCalls: [call('c1'), call('c2', 'running')]
+      }
+    ]
+    expect(isTooling(steps, true)).toBe(true)
+  })
+
+  it('整轮结束后一律收起:历史回放与流式收尾看到的是同一个形状', () => {
+    const steps = [{ messageId: 'm4', content: '', reasoning: '', toolCalls: [call('c1')] }]
+    expect(isTooling(steps, false)).toBe(false)
+    // 中止残留的 running 标记不该让收起状态翻回去
+    expect(isTooling([{ ...steps[0], toolCalls: [call('c1', 'running')] }], false)).toBe(false)
+  })
+
+  it('只看顶层的调用:子 Agent 的过程挂在它自己那一层,由父级 task 调用的状态代表', () => {
+    const steps = [
+      {
+        messageId: 'm5',
+        content: '已经查完了。',
+        reasoning: '',
+        toolCalls: [
+          {
+            ...call('task-1'),
+            name: 'task',
+            agentSteps: [
+              { messageId: 's1', content: '', reasoning: '', toolCalls: [call('c9', 'running')] }
+            ]
+          }
+        ]
+      }
+    ]
+    expect(isTooling(steps, true)).toBe(false)
   })
 })

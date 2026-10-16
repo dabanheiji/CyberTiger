@@ -7,6 +7,7 @@ import type {
   generateReplyDto,
   compactDto,
   setWorkspaceDto,
+  answerQuestionDto,
   ChatStreamEvent,
   CompactReport,
   IpcResult
@@ -41,6 +42,12 @@ export default {
   /** 切换会话的工作空间(dir 为空串即清除) */
   setWorkspace: (dto: setWorkspaceDto): Promise<IpcResult<null>> =>
     ipcRenderer.invoke('chat:setWorkspace', dto),
+  /**
+   * 回答一次 ask_user 提问,让正阻塞着的 run 继续。
+   * answers 为空数组即「跳过这个问题」。
+   */
+  answerQuestion: (dto: answerQuestionDto): Promise<IpcResult<null>> =>
+    ipcRenderer.invoke('chat:answerQuestion', dto),
   /** 订阅流式事件,返回取消订阅函数 */
   onStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)

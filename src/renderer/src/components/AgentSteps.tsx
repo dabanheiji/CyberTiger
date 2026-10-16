@@ -1,7 +1,12 @@
 import XMarkdown from '@ant-design/x-markdown'
 import { Typography, theme } from 'antd'
 import { formatTokens } from '../../../main/tokens/estimate'
-import { summarizeUsage, type AgentStep, type StreamingToolCall } from '../lib/agentSteps'
+import {
+  isTooling,
+  summarizeUsage,
+  type AgentStep,
+  type StreamingToolCall
+} from '../lib/agentSteps'
 import { contextShare } from '../lib/contextUsage'
 import ReasoningBox from './ReasoningBox'
 import ToolCallChain from './ToolCallChain'
@@ -39,6 +44,8 @@ function AgentSteps({ steps, streaming, contextWindow }: AgentStepsProps): React
   // "还在思考"按整个回复判断:一旦产出正文就收起。
   // 若按单步判断,每进入新的一步都会重新展开再折叠,闪得厉害。
   const thinking = streaming && contents.length === 0
+  // 工具链与思考框同一个节奏,但多一条:还有调用在跑就不算开始回答(见 isTooling)
+  const tooling = isTooling(steps, streaming)
   // 用量挂在每一步上,汇总成一行显示;子 Agent 的用量已经并进来
   const usage = summarizeUsage(steps)
 
@@ -48,6 +55,7 @@ function AgentSteps({ steps, streaming, contextWindow }: AgentStepsProps): React
       {toolCalls.length > 0 && (
         <ToolCallChain
           calls={toolCalls}
+          tooling={tooling}
           renderDetail={(call) => (call.agentSteps?.length ? <SubAgentDetail call={call} /> : null)}
         />
       )}

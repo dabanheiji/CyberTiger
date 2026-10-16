@@ -5,11 +5,27 @@ import { ensureStep, mapCall, mapStep, type AgentStep } from '../lib/agentSteps'
 
 export type { AgentStep, StreamingToolCall } from '../lib/agentSteps'
 
+/** 正等着用户回答的那一次提问 */
+export interface PendingQuestion {
+  /** 回答案时凭它认领:主进程那边的等待挂在这个 id 上 */
+  questionId: string
+  /** 发起提问的那次工具调用 id:它的结果到手即表示这次等待已经了结 */
+  callId: string
+  question: string
+  options: string[]
+  multiSelect: boolean
+}
+
 /** 正在进行中的 Agent run */
 export interface StreamingRun {
   conversationId: string
   runId: string
   steps: AgentStep[]
+  /**
+   * 有值就是模型正等着用户选择(run 阻塞在那次 ask_user 调用上)。
+   * 清掉它的时机是同一次调用的 tool_result 到手,而不是提交动作本身 —— 提交失败时卡片得留下。
+   */
+  pendingQuestion: PendingQuestion | null
 }
 
 interface UseAgentStreamOptions {
@@ -89,7 +105,22 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
               status: event.ok ? 'success' : 'error',
               result: event.result,
               reused: event.reused === true
-            }))
+            })),
+            // 那次提问有了结(用户答了、跳了、或本轮中止),卡片就该收起
+            pendingQuestion:
+              current.pendingQuestion?.callId === event.callId ? null : current.pendingQuestion
+          })
+          return
+        case 'ask_user':
+          update({
+            ...current,
+            pendingQuestion: {
+              questionId: event.questionId,
+              callId: event.callId,
+              question: event.question,
+              options: event.options,
+              multiSelect: event.multiSelect
+            }
           })
           return
         case 'usage': {
@@ -129,7 +160,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
         model: ref.model
       })
       if (res.success) {
-        update({ conversationId, runId: res.data.runId, steps: [] })
+        update({ conversationId, runId: res.data.runId, steps: [], pendingQuestion: null })
       }
       return res
     },

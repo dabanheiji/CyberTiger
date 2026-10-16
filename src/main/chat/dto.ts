@@ -118,6 +118,35 @@ export interface setWorkspaceDto {
 }
 
 /**
+ * 模型请用户做选择的那一个问题(已归一化)。
+ * 一次调用只问一件事:嵌套两层数组的 schema 对小模型太难,要问几件事就分几次调用。
+ */
+export interface AskUserQuestion {
+  /** 一句话说清在什么之间做选择 */
+  question: string
+  /** 候选答案,每项本身就是一句能直接当答案的短语;界面会另给一个自由输入的位置 */
+  options: string[]
+  /** true 表示可以多选 */
+  multiSelect: boolean
+}
+
+/**
+ * 用户对一次提问的作答。
+ * 数组里是选中的选项文本(自由输入的那条也放这里),空数组即「跳过,没给选择」;
+ * null 表示压根没拿到答案 —— 本轮被中止,或提问在答案回来前就失效了。
+ */
+export type AskUserAnswer = string[] | null
+
+/**
+ * 回答一次提问。
+ * 主进程那边正阻塞在同一次 ask_user 工具调用上,答案到手 run 才继续。
+ */
+export interface answerQuestionDto {
+  questionId: string
+  answers: string[]
+}
+
+/**
  * 压缩被计划拒绝的原因(与 agent/compact.ts 的 `CompactReason` 同一支,字面量联合结构相同)。
  * 界面要据此解释「现在按了也省不出空间」,所以它不是错误,是一个需要展示的结论。
  */
@@ -164,6 +193,21 @@ export type ChatStreamEvent =
        * 仅用于界面提示;历史回放时无法还原,会退回普通的"已完成"。
        */
       reused?: boolean
+    }
+  /**
+   * 模型请用户在几个候选里做选择(`ask_user` 工具)。
+   * run 会阻塞在这次工具调用上,直到 `chat:answerQuestion` 把答案交回来,或本轮被中止。
+   * 带着 callId 是为了让渲染层在同一次调用的 tool_result 到手时收起卡片;
+   * questionId 只是这一次提问的编号,回答案时凭它认领。
+   */
+  | {
+      type: 'ask_user'
+      scope: RunScope
+      callId: string
+      questionId: string
+      question: string
+      options: string[]
+      multiSelect: boolean
     }
   /**
    * 一步结束时的 token 用量与上下文占用(与 assistant 行一一对应)。

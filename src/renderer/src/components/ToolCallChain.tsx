@@ -1,11 +1,18 @@
 import { useState } from 'react'
-import { ThoughtChain } from '@ant-design/x'
+import { ThoughtChain, Think } from '@ant-design/x'
 import type { ThoughtChainProps } from '@ant-design/x'
+import { ToolOutlined } from '@ant-design/icons'
 import { Typography } from 'antd'
 import type { StreamingToolCall } from '../lib/agentSteps'
 
 interface ToolCallChainProps {
   calls: StreamingToolCall[]
+  /**
+   * 这一轮还在「办事」:链摊开跟着进度走。
+   * 正文开始输出后翻成 false,整条链收成一行的说明,把版面让给回答 ——
+   * 与 `ReasoningBox` 的 `thinking` 同一个时机,不然思考收起了、工具链还杵在那儿。
+   */
+  tooling: boolean
   /** 渲染在参数/结果之后的自定义内容(目前用于子 Agent 的执行过程) */
   renderDetail?: (call: StreamingToolCall) => React.ReactNode
 }
@@ -13,6 +20,7 @@ interface ToolCallChainProps {
 /** 工具名到展示标题的映射;未列出的直接显示函数名 */
 const TOOL_TITLES: Record<string, string> = {
   get_current_time: '获取当前时间',
+  ask_user: '向用户提问',
   task: '派生子 Agent'
 }
 
@@ -64,6 +72,8 @@ const STATUS_MAP: Record<StreamingToolCall['status'], 'loading' | 'success' | 'e
 
 /** 状态文案;命中去重缓存时写明,免得看起来像又执行了一遍 */
 function callDescription(call: StreamingToolCall): string {
+  // 提问停在「等待」上不是卡住:用户没给选择之前,这一轮本来就走不动
+  if (call.status === 'running' && call.name === 'ask_user') return '等待你的回答'
   if (call.status === 'running') return '执行中…'
   if (call.reused) return '已复用本轮结果'
   return call.status === 'error' ? '执行失败' : '已完成'
@@ -100,13 +110,22 @@ function defaultExpandedKeys(calls: StreamingToolCall[]): string[] {
 
 /**
  * 以思维链形式展示一步内的工具调用:标题为工具名,展开可见参数、结果与子 Agent 过程。
+ * 整条链包在一个可折叠的框里,正在执行时摊开、正文开始输出时自动收起(用户仍可点开回看)。
  * 运行中的调用与带子 Agent 过程的调用默认展开,普通调用默认收起;之后不自动收起,交给用户切换。
  */
-function ToolCallChain({ calls, renderDetail }: ToolCallChainProps): React.JSX.Element {
+function ToolCallChain({ calls, tooling, renderDetail }: ToolCallChainProps): React.JSX.Element {
   const autoKeys = defaultExpandedKeys(calls)
   const signature = autoKeys.join(',')
   const [expandedKeys, setExpandedKeys] = useState<string[]>(autoKeys)
   const [prevSignature, setPrevSignature] = useState(signature)
+  // 只在「办事 / 回答」切换的瞬间改变整条链的展开态,不覆盖用户在中途的手动操作
+  // (与 ReasoningBox 同一写法:渲染期间响应 prop 变化,不在 effect 里 setState)
+  const [open, setOpen] = useState(tooling)
+  const [prevTooling, setPrevTooling] = useState(tooling)
+  if (tooling !== prevTooling) {
+    setPrevTooling(tooling)
+    setOpen(tooling)
+  }
 
   if (signature !== prevSignature) {
     setPrevSignature(signature)
@@ -135,13 +154,18 @@ function ToolCallChain({ calls, renderDetail }: ToolCallChainProps): React.JSX.E
     )
   }))
 
+  const running = calls.some((c) => c.status === 'running')
   return (
-    <ThoughtChain
-      items={items}
-      expandedKeys={expandedKeys}
-      onExpand={setExpandedKeys}
+    <Think
+      icon={<ToolOutlined />}
+      title={tooling ? '调用工具中' : `已调用 ${calls.length} 个工具`}
+      loading={running}
+      expanded={open}
+      onExpand={setOpen}
       style={{ marginBottom: 8 }}
-    />
+    >
+      <ThoughtChain items={items} expandedKeys={expandedKeys} onExpand={setExpandedKeys} />
+    </Think>
   )
 }
 

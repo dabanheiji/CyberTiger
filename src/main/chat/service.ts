@@ -17,6 +17,8 @@ import type {
   sendMessageDto,
   generateReplyDto,
   compactDto,
+  AskUserAnswer,
+  AskUserQuestion,
   ChatStreamEvent,
   CompactReport,
   RunScope,
@@ -46,6 +48,8 @@ import {
   systemPromptMessage,
   toIdentifiedMessages
 } from '../agent/history'
+import { createAskUserTool, type AskUserHandler } from '../agent/ask'
+import { createQuestionGate } from './questions'
 import { workspaceNote } from '../agent/prompt'
 import {
   createTaskTool,
@@ -75,6 +79,20 @@ interface ActiveRun {
 const activeRuns = new Map<string, ActiveRun>()
 /** 应用退出中:不再写库 */
 let quitting = false
+
+/** 正等着用户回答的提问(ask_user 工具在那儿等) */
+const questionGate = createQuestionGate()
+
+/**
+ * 把用户的选择交回给正阻塞着的那次 ask_user 调用。
+ * id 对不上说明这次提问已经了结(答案已到手、本轮已中止、会话被删),
+ * 这种情况要报错让界面知道「这条答案没处送」,而不是悄悄丢掉。
+ */
+export function answerQuestion(questionId: string, answers: string[]): void {
+  if (!questionGate.answer(questionId, answers)) {
+    throw new Error('这个问题已经回答过,或者已经失效了')
+  }
+}
 
 export function listConversations(): Conversation[] {
   return getDb().prepare<[], Conversation>(chatSql.conversations.list).all()
@@ -669,6 +687,26 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
 }
 
 /**
+ * 构造 ask_user 的提问通道:把问题发给渲染层,然后等这一次 run 了结。
+ *
+ * 每次提问现取一个 questionId,渲染层提交答案时凭它认领;callId 只用于让界面在同一次
+ * 调用的结果到手时收起卡片,两个 id 都由同一条事件带过去。
+ * 信号已经中止就什么都不发:gate 会当场按「没拿到回答」了结,而此刻也没有界面在等这个问题。
+ */
+function createAsker(
+  scope: RunScope,
+  signal: AbortSignal,
+  emit: (event: ChatStreamEvent) => void
+): AskUserHandler {
+  return (question: AskUserQuestion, callId: string): Promise<AskUserAnswer> => {
+    if (signal.aborted) return Promise.resolve(null)
+    const questionId = uuidv4()
+    emit({ type: 'ask_user', scope, callId, questionId, ...question })
+    return questionGate.open(questionId, signal)
+  }
+}
+
+/**
  * 启动一次 Agent run:基于会话历史让模型推理、调用工具、生成最终回复。
  * 同步返回 runId,过程在后台进行,各步事件通过 emit 推送。
  */
@@ -738,6 +776,9 @@ async function startRun(input: StartRunInput): Promise<void> {
   const definitions = getAllTools()
 
   const tools = [...definitions]
+  // 提问工具与 task 一样按 run 现构造(要闭包握住这次的 emit / scope / signal),因此不进
+  // builtinTools:子 Agent 的工具池天然不含它,子 Agent 的上下文里本来也没有用户。
+  tools.push(createAskUserTool(createAsker(scope, signal, emit)))
   // 允许派生子 Agent 时,给主 agent 挂上 task 工具(子 agent 自己拿不到它)
   if (store.get('enableSubAgent') !== false) {
     tools.push(

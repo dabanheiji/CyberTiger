@@ -11,7 +11,8 @@ import {
   abortReply,
   compactContext,
   pickWorkspace,
-  setWorkspace
+  setWorkspace,
+  answerQuestion
 } from '../chat/controller'
 import {
   getStatus as mcpGetStatus,
@@ -38,6 +39,7 @@ export function registerIpc(): void {
   ipcMain.handle('chat:compactContext', compactContext)
   ipcMain.handle('chat:pickWorkspace', pickWorkspace)
   ipcMain.handle('chat:setWorkspace', setWorkspace)
+  ipcMain.handle('chat:answerQuestion', answerQuestion)
 
   ipcMain.handle('mcp:getStatus', mcpGetStatus)
   ipcMain.handle('mcp:saveConfig', mcpSaveConfig)

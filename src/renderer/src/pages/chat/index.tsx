@@ -251,6 +251,37 @@ function ChatPage(): React.JSX.Element {
   }
 
   /**
+   * 把用户的选择交回主进程:那边正阻塞在同一次 ask_user 工具调用上,答案到手这一轮才继续。
+   * 卡片的收起交给同一次调用的 tool_result 事件,这里只负责送答案 —— 送不出去时(提问已
+   * 了结)把原因说清就好,静默失败看起来像按钮没反应。
+   */
+  const handleAnswerQuestion = async (answers: string[]): Promise<void> => {
+    const pending = streaming?.pendingQuestion
+    if (!pending) return
+    const res = await window.api.chat.answerQuestion({
+      questionId: pending.questionId,
+      answers
+    })
+    if (!res.success) message.error(res.msg)
+  }
+
+  /**
+   * 提问也可能来自后台会话(切换会话不影响正在跑的 run)。
+   * 卡片只在当前会话显示,所以那边在等的时候提一句是哪个对话,否则用户只看到一个
+   * 转圈的停止按钮,却不知道这一轮卡在谁那儿。每个问题只提一次。
+   */
+  const warnedQuestionRef = useRef('')
+  useEffect(() => {
+    const pending = streaming?.pendingQuestion
+    if (!pending || !streaming || pending.questionId === warnedQuestionRef.current) return
+    warnedQuestionRef.current = pending.questionId
+    if (streaming.conversationId === activeIdRef.current) return
+    const title =
+      conversations.find((c) => c.id === streaming.conversationId)?.title ?? '另一个对话'
+    message.warning(`「${title}」在等你回答`)
+  }, [streaming, conversations, message])
+
+  /**
    * 手动压缩当前会话的上下文。
    *
    * 压没压都要说一句:被计划拒绝时(可压的太少 / 省不出空间)用户点这颗按钮就是为了
@@ -312,6 +343,9 @@ function ChatPage(): React.JSX.Element {
     })
   }
 
+  /** 只把属于当前会话的流式内容交给面板,切走时不显示 */
+  const shownRun = streaming?.conversationId === activeId ? streaming : null
+
   return (
     <div style={{ display: 'flex', height: '100%', background: token.colorBgLayout }}>
       <Sidebar
@@ -326,8 +360,8 @@ function ChatPage(): React.JSX.Element {
       />
       <ChatPanel
         messages={messages}
-        // 只把属于当前会话的流式内容交给面板,切走时不显示
-        streaming={streaming?.conversationId === activeId ? streaming : null}
+        streaming={shownRun}
+        pendingQuestion={shownRun?.pendingQuestion ?? null}
         isDraft={activeId === null}
         sending={sending}
         providers={providers}
@@ -337,6 +371,7 @@ function ChatPage(): React.JSX.Element {
         recentWorkspaces={recentWorkspaces}
         onSend={handleSend}
         onCancel={handleCancel}
+        onAnswerQuestion={(answers) => void handleAnswerQuestion(answers)}
         onCompact={() => void handleCompact()}
         onModelChange={handleModelChange}
         onOpenSettings={openSettings}

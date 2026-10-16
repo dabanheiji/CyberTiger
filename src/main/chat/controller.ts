@@ -9,6 +9,7 @@ import {
   generateReply as generateReplyService,
   abortReply as abortReplyService,
   compactConversationManually,
+  answerQuestion as answerQuestionService,
   hasActiveWork,
   setConversationWorkspace
 } from './service'
@@ -19,6 +20,7 @@ import type {
   generateReplyDto,
   compactDto,
   setWorkspaceDto,
+  answerQuestionDto,
   ChatStreamEvent,
   CompactReport,
   IpcResult
@@ -145,6 +147,20 @@ export function setWorkspace(_e: IpcMainInvokeEvent, dto: setWorkspaceDto): IpcR
       throw new Error('这一轮还在进行中,请等它结束或先点击停止')
     }
     setConversationWorkspace(dto.conversationId, dto.dir)
+    return null
+  })
+}
+
+/**
+ * 把用户的选择交回给正阻塞着的 ask_user 工具调用。
+ *
+ * answers 为空数组即「跳过」:主进程照样把这次等待了结,让模型带着「用户没给选择」继续,
+ * 而不是让这一轮永远悬着。提问已了结(答案先到、本轮中止、会话被删)时 msg 说清去向,
+ * 界面才知道这条答案没送出去。
+ */
+export function answerQuestion(_e: IpcMainInvokeEvent, dto: answerQuestionDto): IpcResult<null> {
+  return run(() => {
+    answerQuestionService(dto.questionId, dto.answers)
     return null
   })
 }

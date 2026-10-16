@@ -119,6 +119,19 @@ export function mapCall(
   }))
 }
 
+/**
+ * 工具链该不该摊开:整轮还在「办事」时摊开跟着进度,正文开始输出就收成一节,把版面让给回答。
+ *
+ * 判断按整个回复而不是单步,与深度思考同一个时机 —— 逐步判断会让每进入新的一步都重新展开再折叠。
+ * 例外是「还有调用在跑」:模型常在动手前先说一句「我来看看 X」,那句不是开始回答,
+ * 那时收起会把正在执行的过程藏没。
+ */
+export function isTooling(steps: AgentStep[], streaming: boolean): boolean {
+  if (!streaming) return false
+  if (!steps.some((step) => !!step.content)) return true
+  return steps.some((step) => step.toolCalls.some((call) => call.status === 'running'))
+}
+
 /** tool 行:从最近的一步往前找对应的调用并填入结果 */
 export function attachToolResult(steps: AgentStep[], toolCallId: string, result: string): void {
   for (let i = steps.length - 1; i >= 0; i--) {

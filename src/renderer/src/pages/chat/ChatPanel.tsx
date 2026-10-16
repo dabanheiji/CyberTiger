@@ -20,10 +20,16 @@ import { formatTokens } from '../../../../main/tokens/estimate'
 import { modelKey, parseModelKey } from '../../lib/modelRef'
 import { workspaceLabel } from '../../lib/workspace'
 import { contextUsage, usageLevel, type ContextUsage } from '../../lib/contextUsage'
-import type { AgentStep, StreamingRun, StreamingToolCall } from '../../hooks/useAgentStream'
+import type {
+  AgentStep,
+  PendingQuestion,
+  StreamingRun,
+  StreamingToolCall
+} from '../../hooks/useAgentStream'
 import { attachToolResult, finalizeStep, findCall, toStepUsage } from '../../lib/agentSteps'
 import { useSkills } from '../../hooks/useSkills'
 import AgentSteps from '../../components/AgentSteps'
+import AskUserCard from '../../components/AskUserCard'
 
 /** 交给气泡 contentRender 的内容 */
 interface UserBubbleContent {
@@ -59,10 +65,14 @@ interface ChatPanelProps {
   workspace: string
   /** 最近用过的工作空间,最新在前 */
   recentWorkspaces: string[]
+  /** 模型正等着用户回答的那次提问;run 就阻塞在这一轮的那次工具调用上 */
+  pendingQuestion: PendingQuestion | null
   /** skillName 为通过 / 选择的 skill,未选择时为 undefined */
   onSend: (content: string, skillName?: string) => void
   /** 用户点击停止按钮 */
   onCancel: () => void
+  /** 用户提交选择(或跳过,此时是空数组) */
+  onAnswerQuestion: (answers: string[]) => void
   /** 占用环里那颗「立即压缩上下文」 */
   onCompact: () => void
   onModelChange: (ref: ModelRef) => void
@@ -338,8 +348,10 @@ function ChatPanel({
   compacting,
   workspace,
   recentWorkspaces,
+  pendingQuestion,
   onSend,
   onCancel,
+  onAnswerQuestion,
   onCompact,
   onModelChange,
   onOpenSettings,
@@ -426,6 +438,16 @@ function ChatPanel({
         )}
       </div>
       <div style={{ padding: `0 ${token.padding}px ${token.padding}px` }}>
+        {/* 提问卡片压住输入区:这一轮本来就停在等用户的选择 */}
+        {pendingQuestion && (
+          <AskUserCard
+            key={pendingQuestion.questionId}
+            question={pendingQuestion.question}
+            options={pendingQuestion.options}
+            multiSelect={pendingQuestion.multiSelect}
+            onAnswer={onAnswerQuestion}
+          />
+        )}
         {/* 输入 / 时弹出 skill 列表;选中后作为标签显示在输入框内 */}
         <Suggestion
           block
