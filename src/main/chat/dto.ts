@@ -147,6 +147,61 @@ export interface answerQuestionDto {
 }
 
 /**
+ * 一次待审批的工具调用(已归一化,由 `tools/permission.ts` 的判定给出)。
+ *
+ * run 阻塞在这次调用上,直到 `chat:decideApproval` 交回决定、本轮中止、或超时无人应答。
+ * 带 `callId` 是让渲染层在同一次调用的 tool_result 到手时收起卡片(与提问同一套纪律:
+ * 提交动作本身不收,提交失败时卡片必须还在原处);`approvalId` 只是这一次请求的编号,
+ * 交回决定时凭它认领。
+ */
+export interface ApprovalRequest {
+  approvalId: string
+  callId: string
+  /** 被调用的工具名(MCP 工具是 `server__tool`) */
+  tool: string
+  /** 卡片标题下第一行:一句话说清要干什么 */
+  summary: string
+  /** 逐条事实:命令行、实际目录、目标路径、风险理由、是否子 Agent 发起 */
+  detail: string[]
+  /** `listed` 表示不是因为风险、而是因为命中黑名单才问 */
+  risk: 'low' | 'elevated' | 'listed'
+  /** 「本轮同类都允许」放行的那一类;按钮文案要把它写出来,按下去等于放行一整类 */
+  runAllowKey: string
+  /** 子 Agent 发起时是角色名,卡片要标明不是主 Agent 在动手 */
+  agent: string
+}
+
+/** 用户在卡片上按下的那颗按钮 */
+export type ApprovalOutcome = 'allow' | 'allow_run' | 'deny'
+
+/**
+ * 一次审批的了结方式。
+ *
+ * `aborted` 与 `timeout` 都按「没有批准」收场,但给模型的文案是三句不同的事实
+ * (用户拒绝了 / 本轮已中止 / 无人应答超时)—— 混成一句会让模型以为用户反对这件事。
+ * `allow_run` 不带键:键由主进程侧的请求载荷记住,渲染层无权改动放行范围。
+ */
+export type ApprovalSettlement =
+  | { kind: 'allow' }
+  | { kind: 'allow_run' }
+  | { kind: 'deny'; reason: string }
+  | { kind: 'aborted' }
+  | { kind: 'timeout' }
+
+/** 交回一次审批的决定 */
+export interface decideApprovalDto {
+  approvalId: string
+  outcome: ApprovalOutcome
+  /** 拒绝时用户补的原因,原样转告模型;允许时忽略 */
+  reason?: string
+}
+
+/** `chat:pendingApprovals` 的一条:渲染层重载后靠它把还挂着的卡片填回来 */
+export interface PendingApprovalDto extends ApprovalRequest {
+  conversationId: string
+}
+
+/**
  * 压缩被计划拒绝的原因(与 agent/compact.ts 的 `CompactReason` 同一支,字面量联合结构相同)。
  * 界面要据此解释「现在按了也省不出空间」,所以它不是错误,是一个需要展示的结论。
  */
@@ -209,6 +264,12 @@ export type ChatStreamEvent =
       options: string[]
       multiSelect: boolean
     }
+  /**
+   * 这一步要用工具,而当前权限档位要求用户先批准(`tools/permission.ts` 的判定)。
+   * run 阻塞在这次工具调用上,`chat:decideApproval` 交回决定后才继续。
+   * 它一定晚于 `chat:generateReply` 的应答(发生在某步的工具执行途中),所以不需要 `ensureStep`。
+   */
+  | { type: 'tool_approval'; scope: RunScope; request: ApprovalRequest }
   /**
    * 一步结束时的 token 用量与上下文占用(与 assistant 行一一对应)。
    * 子 agent 同样发:它的成本要能并进父级气泡的总量,而不是凭空消失。

@@ -78,6 +78,30 @@ export interface AppearanceSettings {
   accent?: string
 }
 
+/**
+ * 三档权限模式。缺省 `'ask'` —— 未设置就是最严格那一档,和「配置文件里没有这一键」
+ * 是同一个意思,所以不必进 defaults、也不必走迁移。
+ */
+export type PermissionMode = 'ask' | 'auto' | 'full'
+
+/** 「权限」设置:与 `appearance` 同一条纪律,整体一个键写入,避免「mode 落了、名单没落」 */
+export interface PermissionSettings {
+  /** 缺省即 `'ask'`:每条命令与越界读写都弹审批 */
+  mode?: PermissionMode
+  /**
+   * 白名单:命中即免审批。条目三种形状(命令前缀 / 工具名 / 以 `__` 结尾的 MCP server 前缀),
+   * 解析规则的唯一实现在 `tools/permission.ts`。
+   */
+  allow?: string[]
+  /**
+   * 黑名单:命中必审批,**优先级高于白名单,也高于 `'full'`** ——
+   * 它是唯一在任何档位都拦得住的闸门,所以「完全访问」也照样拦。
+   */
+  deny?: string[]
+  /** 用户已在「完全访问」的风险确认里勾过「我已知晓,以后不再询问」 */
+  acknowledgeFullAccess?: boolean
+}
+
 export interface AppSettings {
   /** 模型服务商列表 */
   providers?: ModelProvider[]
@@ -103,6 +127,11 @@ export interface AppSettings {
    * `mode` 由主进程在启动与写入时应用到 `nativeTheme`,`accent` 只在渲染层生效。
    */
   appearance?: AppearanceSettings
+  /**
+   * 工具执行审批:档位与黑白名单。未设置即 `'ask'` + 两份空名单。
+   * 一次 run 开始时读一次并随整轮固定(收紧立即、放宽下一轮),详见 `chat/service.ts`。
+   */
+  permissions?: PermissionSettings
   /**
    * @deprecated 上下文窗口已经下放到每个模型(ModelConfig.contextWindow)。
    * 仅 migrateSettings 会读它并搬进当前选中的模型,新代码一律按模型取。

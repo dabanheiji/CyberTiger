@@ -17,6 +17,9 @@ import type {
   sendMessageDto,
   generateReplyDto,
   compactDto,
+  ApprovalRequest,
+  decideApprovalDto,
+  PendingApprovalDto,
   AskUserAnswer,
   AskUserQuestion,
   ChatStreamEvent,
@@ -66,9 +69,15 @@ import { estimateRequestTokens, estimateTextTokens } from '../tokens/estimate'
 import {
   createToolRunner,
   getAllTools,
+  getMcpToolNames,
   type ToolContext,
-  type ToolDefinition
+  type ToolDefinition,
+  type ToolRunner
 } from '../tools/registry'
+import { createApprovalGate } from './approvals'
+import { withApproval } from './approval'
+import { stricterMode, type PermissionLists } from '../tools/permission'
+import type { PermissionMode, PermissionSettings } from '../store/types'
 
 interface ActiveRun {
   conversationId: string
@@ -92,6 +101,98 @@ export function answerQuestion(questionId: string, answers: string[]): void {
   if (!questionGate.answer(questionId, answers)) {
     throw new Error('这个问题已经回答过,或者已经失效了')
   }
+}
+
+/** 正等着用户批准的审批请求(`withApproval` 在那儿等) */
+const approvalGate = createApprovalGate()
+
+/**
+ * 把用户的决定交回给正阻塞着的那次工具调用。
+ * id 对不上说明这次审批已经了结(决定已到手、本轮已中止、或等到超时),
+ * 这种情况报错让界面知道「这条决定没处送」,悄悄丢掉看起来就像按钮没反应。
+ */
+export function decideApproval(dto: decideApprovalDto): void {
+  if (!approvalGate.decide(dto.approvalId, dto.outcome, dto.reason)) {
+    throw new Error('这条审批已经生效,或者已经失效了')
+  }
+}
+
+/**
+ * 还挂着的审批请求。
+ * 渲染层 Cmd+R 之后 `streaming` 归零、事件全被 runId 过滤,正等审批的那一轮会在界面上
+ * 消失,而主进程还阻塞在它上面 —— 靠这个拉回卡片。切换工作空间与手动压缩都要求无进行中
+ * run,所以那个洞会把整个会话堵死。
+ */
+export function pendingApprovals(): PendingApprovalDto[] {
+  return approvalGate.list()
+}
+
+/**
+ * 审批闸门的运行期上下文:一次 run 一份,父子 run 共用。
+ *
+ * `runAllow` 是共享的那份「本轮已放行的类」—— 主 Agent 批过的类,子 Agent 里再问一次
+ * 不会带来新信息;反过来若各记各的,派个子 Agent 就等于把已批的类重新问一遍。
+ */
+interface ApprovalContext {
+  /** run 开始时拍的一次名单:跑到一半改名单,已发出的那些调用按哪份算说不清 */
+  lists: PermissionLists
+  /** 本次 run 的档位基准,只会被更严的设置刹住,不会被当场放宽 */
+  startMode: PermissionMode
+  runAllow: Set<string>
+  /** 与工具快照同一时刻读的 MCP 工具名:外部 server 的代码不受本项目控制,整档纳入审批面 */
+  mcpToolNames: Set<string>
+  /** 窗口没在前台时叫用户回来(由 controller 给,它才握着 WebContents) */
+  notify?: (request: ApprovalRequest) => void
+}
+
+/** 未设置即 `'ask'` + 两份空名单:设置里没有这一键,就是最严那一档 */
+function readPermissions(): PermissionSettings {
+  return store.get('permissions') ?? {}
+}
+
+function readLists(settings: PermissionSettings): PermissionLists {
+  return { allow: settings.allow ?? [], deny: settings.deny ?? [] }
+}
+
+/**
+ * 造一次 run 的审批上下文。
+ *
+ * 档位是**每次工具调用现读**的:用户点「询问审批」要立刻刹住正在跑的那一轮,
+ * 而点「完全访问」不该让已经按严档位跑了几步的那一轮突然免审 ——
+ * 所以读到的设置与本次基准取更严的那一档,放宽只能等下一次 startRun。
+ */
+function createApprovalContext(notify?: (request: ApprovalRequest) => void): ApprovalContext {
+  const settings = readPermissions()
+  return {
+    lists: readLists(settings),
+    startMode: settings.mode ?? 'ask',
+    runAllow: new Set<string>(),
+    mcpToolNames: getMcpToolNames(),
+    notify
+  }
+}
+
+/** 给一次 run(主或子)的工具执行套上审批闸门 */
+function withGate(
+  runner: ToolRunner,
+  approval: ApprovalContext,
+  scope: RunScope,
+  workspace: string,
+  emit: (event: ChatStreamEvent) => void,
+  signal: AbortSignal
+): ToolRunner {
+  return withApproval(runner, {
+    modeOf: (): PermissionMode => stricterMode(readPermissions().mode ?? 'ask', approval.startMode),
+    lists: approval.lists,
+    workspace,
+    scope,
+    signal,
+    gate: approvalGate,
+    runAllow: approval.runAllow,
+    mcpToolNames: approval.mcpToolNames,
+    emit,
+    notify: approval.notify
+  })
 }
 
 export function listConversations(): Conversation[] {
@@ -600,6 +701,12 @@ interface SpawnerContext {
    */
   workspace: string
   emit: (event: ChatStreamEvent) => void
+  /**
+   * 父级那一份审批上下文,子 Agent 整套继承。
+   * 这是这条链上最要紧的一处接线:子 run 自己拍工具快照,只给主 Agent 套闸门的话,
+   * 模型(或小模型的一时兴起)走 `task` 就绕开了整道审批。
+   */
+  approval: ApprovalContext
 }
 
 /** 构造 task 工具的 spawner:跑一次独立上下文的子 agent run,返回它的最终结论 */
@@ -644,7 +751,15 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
     const pool = ctx.parentTools.filter((t) => t.name !== TASK_TOOL_NAME)
     // 角色白名单与模型本次指定的白名单取交集
     const tools = filterTools(pool, [role.tools, req.tools])
-    const runner = createToolRunner(tools)
+    // 与父级同一个审批闸门与同一份放行集:派生子 Agent 不是绕过审批的通道
+    const runner = withGate(
+      createToolRunner(tools),
+      ctx.approval,
+      scope,
+      ctx.workspace,
+      ctx.emit,
+      ctx.signal
+    )
     // 只有真拿得到 load_skill 时才给它 skill 目录,避免提示词与实际工具不一致
     const canLoadSkills = tools.some((t) => t.name === loadSkillTool.name)
 
@@ -709,10 +824,14 @@ function createAsker(
 /**
  * 启动一次 Agent run:基于会话历史让模型推理、调用工具、生成最终回复。
  * 同步返回 runId,过程在后台进行,各步事件通过 emit 推送。
+ *
+ * `notify` 只在有审批在等时用:审批会让整轮停在用户身上,而用户可能根本没在看这个窗口。
+ * 它由 controller 传入(那里才握着 WebContents),service 不认识 electron 窗口。
  */
 export function generateReply(
   dto: generateReplyDto,
-  emit: (event: ChatStreamEvent) => void
+  emit: (event: ChatStreamEvent) => void,
+  notify?: (request: ApprovalRequest) => void
 ): string {
   if (!dto.model) throw new Error('请先选择模型')
   // 单次 run 以调用方显式传入的选择为准;没传就退回设置里上次选中的那个
@@ -742,7 +861,8 @@ export function generateReply(
     ref,
     connection,
     signal: controller.signal,
-    emit
+    emit,
+    notify
   }).finally(() => {
     activeRuns.delete(runId)
   })
@@ -757,6 +877,8 @@ interface StartRunInput {
   connection: ResolvedConnection
   signal: AbortSignal
   emit: (event: ChatStreamEvent) => void
+  /** 审批等待时的系统通知,原样转交给审批上下文 */
+  notify?: (request: ApprovalRequest) => void
 }
 
 /**
@@ -767,13 +889,15 @@ interface StartRunInput {
  * 而不是「这轮还带着全部历史、下轮才用上摘要」。
  */
 async function startRun(input: StartRunInput): Promise<void> {
-  const { conversationId, scope, connection, signal, emit } = input
+  const { conversationId, scope, connection, signal, emit, notify } = input
   const { baseUrl, apiKey, model, contextWindow } = connection
   // 工作空间在 run 开始前读一次并随整轮带走:中途改设置不影响这一轮,
   // 而且相对路径的基准必须在整轮里稳定,否则上一条工具结果指的文件会换含义
   const workspace = getWorkspace(conversationId)
   // 工具快照在 run 开始时固定,保证本次 run 的执行范围与发给模型的列表严格一致
   const definitions = getAllTools()
+  // 审批上下文与工具快照同一时刻建:MCP 工具的名字与「哪些算外部工具」必须是同一批
+  const approval = createApprovalContext(notify)
 
   const tools = [...definitions]
   // 提问工具与 task 一样按 run 现构造(要闭包握住这次的 emit / scope / signal),因此不进
@@ -790,7 +914,8 @@ async function startRun(input: StartRunInput): Promise<void> {
           signal,
           parentTools: definitions,
           workspace,
-          emit
+          emit,
+          approval
         }),
         // 与 system prompt 里的角色目录取同一份名单,保证 schema 与提示词一致
         { agents: agentRegistry.getEnabledCustom().map((a) => a.name) }
@@ -836,7 +961,8 @@ async function startRun(input: StartRunInput): Promise<void> {
     signal,
     history,
     workspace,
-    runner: createToolRunner(tools),
+    // 主 Agent 的每次工具调用都先过审批闸门(档位与名单见 tools/permission.ts)
+    runner: withGate(createToolRunner(tools), approval, scope, workspace, emit, signal),
     maxSteps: MAIN_AGENT_MAX_STEPS,
     // 窗口跟着本次解析出的连接走:换服务商 / 换模型都自动跟着变,不再依赖一个全局值
     budget: budgetFor(contextWindow),

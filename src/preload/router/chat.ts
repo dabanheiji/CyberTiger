@@ -8,6 +8,8 @@ import type {
   compactDto,
   setWorkspaceDto,
   answerQuestionDto,
+  decideApprovalDto,
+  PendingApprovalDto,
   ChatStreamEvent,
   CompactReport,
   IpcResult
@@ -48,6 +50,19 @@ export default {
    */
   answerQuestion: (dto: answerQuestionDto): Promise<IpcResult<null>> =>
     ipcRenderer.invoke('chat:answerQuestion', dto),
+  /**
+   * 交回一次审批的决定,让正阻塞着的工具调用继续。
+   * outcome 为 'deny' 时 reason 是可选的「说说为什么」,它会原样转告模型。
+   */
+  decideApproval: (dto: decideApprovalDto): Promise<IpcResult<null>> =>
+    ipcRenderer.invoke('chat:decideApproval', dto),
+  /**
+   * 当前还挂着的审批请求。
+   * 渲染层重载后事件订阅是全新的、流式状态也归零,靠这个把卡片填回来 ——
+   * 否则主进程仍阻塞在那次工具调用上,而界面上没有任何地方能回答它。
+   */
+  pendingApprovals: (): Promise<IpcResult<PendingApprovalDto[]>> =>
+    ipcRenderer.invoke('chat:pendingApprovals'),
   /** 订阅流式事件,返回取消订阅函数 */
   onStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)

@@ -16,6 +16,11 @@ interface AgentStepsProps {
   /** 这组步骤所属的 run 仍在进行中 */
   streaming: boolean
   /**
+   * 正等审批的那次工具调用 id(主 / 子 run 都可能是这个 id)。
+   * 传了才在工具链里把那条写成「等待你的审批」—— 它停在 running 不是卡住,而是这一轮在等人。
+   */
+  awaitingApprovalCallId?: string
+  /**
    * 当前模型的上下文窗口;传了才在用量后面补百分比。
    * 子 Agent 面板不传 —— 它用的是另一份上下文,窗口还可能不是同一个模型,
    * 按主会话的窗口算出来的比例是假数。
@@ -30,7 +35,12 @@ interface AgentStepsProps {
  * 一长串重复的「深度思考」,信息密度反而更低,也看不出哪段思考对应哪次行动。
  * 主气泡与子 Agent 面板共用此组件,子 Agent 面板里会递归渲染它自己。
  */
-function AgentSteps({ steps, streaming, contextWindow }: AgentStepsProps): React.JSX.Element {
+function AgentSteps({
+  steps,
+  streaming,
+  awaitingApprovalCallId,
+  contextWindow
+}: AgentStepsProps): React.JSX.Element {
   // 各步的思考按顺序拼进同一个框
   const reasoning = steps
     .map((step) => step.reasoning)
@@ -56,7 +66,12 @@ function AgentSteps({ steps, streaming, contextWindow }: AgentStepsProps): React
         <ToolCallChain
           calls={toolCalls}
           tooling={tooling}
-          renderDetail={(call) => (call.agentSteps?.length ? <SubAgentDetail call={call} /> : null)}
+          awaitingApprovalCallId={awaitingApprovalCallId}
+          renderDetail={(call) =>
+            call.agentSteps?.length ? (
+              <SubAgentDetail call={call} awaitingApprovalCallId={awaitingApprovalCallId} />
+            ) : null
+          }
         />
       )}
       {contents.map((item) => (
@@ -76,13 +91,15 @@ function AgentSteps({ steps, streaming, contextWindow }: AgentStepsProps): React
 
 interface SubAgentDetailProps {
   call: StreamingToolCall
+  /** 原样下传:子 Agent 的调用停在审批上时,它那侧的工具链也要写「等待你的审批」 */
+  awaitingApprovalCallId?: string
 }
 
 /**
  * 子 Agent 的执行过程,嵌在发起它的那次 task 调用里。
  * 折叠由外层的工具调用项统一控制,这里只负责缩进与角色标注。
  */
-function SubAgentDetail({ call }: SubAgentDetailProps): React.JSX.Element {
+function SubAgentDetail({ call, awaitingApprovalCallId }: SubAgentDetailProps): React.JSX.Element {
   const { token } = theme.useToken()
   return (
     <div
@@ -97,7 +114,11 @@ function SubAgentDetail({ call }: SubAgentDetailProps): React.JSX.Element {
           子 Agent 角色:{call.agentName}
         </Typography.Text>
       )}
-      <AgentSteps steps={call.agentSteps ?? []} streaming={call.status === 'running'} />
+      <AgentSteps
+        steps={call.agentSteps ?? []}
+        streaming={call.status === 'running'}
+        awaitingApprovalCallId={awaitingApprovalCallId}
+      />
     </div>
   )
 }

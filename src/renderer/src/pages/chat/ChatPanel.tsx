@@ -13,7 +13,8 @@ import {
   UserOutlined
 } from '@ant-design/icons'
 import type { Message } from '../../../../main/chat/sql'
-import type { ModelProvider, ModelRef } from '../../../../main/store/types'
+import type { ApprovalOutcome, ApprovalRequest } from '../../../../main/chat/dto'
+import type { ModelProvider, ModelRef, PermissionSettings } from '../../../../main/store/types'
 import { contextWindowOf } from '../../../../main/store/modelRef'
 import { budgetFor } from '../../../../main/agent/context'
 import { formatTokens } from '../../../../main/tokens/estimate'
@@ -30,6 +31,8 @@ import { attachToolResult, finalizeStep, findCall, toStepUsage } from '../../lib
 import { useSkills } from '../../hooks/useSkills'
 import AgentSteps from '../../components/AgentSteps'
 import AskUserCard from '../../components/AskUserCard'
+import ApprovalCard from '../../components/ApprovalCard'
+import PermissionPicker from './PermissionPicker'
 
 /** 交给气泡 contentRender 的内容 */
 interface UserBubbleContent {
@@ -41,6 +44,11 @@ interface AssistantBubbleContent {
   steps: AgentStep[]
   /** 该气泡对应的 run 正在进行中 */
   streaming: boolean
+  /**
+   * 正等审批的那次工具调用 id:工具链里那条要写「等待你的审批」而不是「执行中…」。
+   * 只传 id 不传整份请求 —— 卡片才是详情面,气泡里只需要一句话。
+   */
+  awaitingApprovalCallId?: string
   /**
    * 用来把「本条回复的上下文占用」换算成百分比的窗口。
    * 库里的行没记录当时用的是哪个模型,所以按当前所选模型的窗口算 ——
@@ -73,6 +81,19 @@ interface ChatPanelProps {
   onCancel: () => void
   /** 用户提交选择(或跳过,此时是空数组) */
   onAnswerQuestion: (answers: string[]) => void
+  /**
+   * 正等审批的那一次工具调用;run 就阻塞在它上面。
+   * 与提问同一套纪律:卡片由事件写入,由同 callId 的 tool_result 收起,不由提交动作收起。
+   */
+  pendingApproval: ApprovalRequest | null
+  /** 当前会话的权限设置(档位 + 名单);整份交给父层写 store */
+  permissions: PermissionSettings
+  /** 用户在底栏换了档位 */
+  onPermissionChange: (next: PermissionSettings) => void
+  /** 用户在卡片上按下允许 / 本轮同类都允许 / 拒绝 */
+  onDecideApproval: (outcome: ApprovalOutcome, reason: string) => void
+  /** 卡片上那个「加入白名单」:本期只跳到设置页 */
+  onOpenWhitelist: () => void
   /** 占用环里那颗「立即压缩上下文」 */
   onCompact: () => void
   onModelChange: (ref: ModelRef) => void
@@ -120,7 +141,12 @@ function makeRoles(token: GlobalToken): BubbleListProps['role'] {
       variant: 'borderless',
       avatar: <Avatar icon={<RobotOutlined />} />,
       contentRender: (msg: AssistantBubbleContent) => (
-        <AgentSteps steps={msg.steps} streaming={msg.streaming} contextWindow={msg.contextWindow} />
+        <AgentSteps
+          steps={msg.steps}
+          streaming={msg.streaming}
+          awaitingApprovalCallId={msg.awaitingApprovalCallId}
+          contextWindow={msg.contextWindow}
+        />
       )
     }
   }
@@ -359,6 +385,11 @@ function ChatPanel({
   workspace,
   recentWorkspaces,
   pendingQuestion,
+  pendingApproval,
+  permissions,
+  onPermissionChange,
+  onDecideApproval,
+  onOpenWhitelist,
   onSend,
   onCancel,
   onAnswerQuestion,
@@ -409,7 +440,12 @@ function ChatPanel({
     return {
       key: g.key,
       role: 'assistant',
-      content: { steps, streaming: isStreaming, contextWindow } as AssistantBubbleContent,
+      content: {
+        steps,
+        streaming: isStreaming,
+        awaitingApprovalCallId: isStreaming ? pendingApproval?.callId : undefined,
+        contextWindow
+      } as AssistantBubbleContent,
       loading: isStreaming && steps.every(isEmptyStep),
       streaming: isStreaming
     }
@@ -419,7 +455,12 @@ function ChatPanel({
     items.push({
       key: streaming.runId,
       role: 'assistant',
-      content: { steps: streaming.steps, streaming: true, contextWindow } as AssistantBubbleContent,
+      content: {
+        steps: streaming.steps,
+        streaming: true,
+        awaitingApprovalCallId: pendingApproval?.callId,
+        contextWindow
+      } as AssistantBubbleContent,
       loading: streaming.steps.every(isEmptyStep),
       streaming: true
     })
@@ -468,6 +509,16 @@ function ChatPanel({
             options={pendingQuestion.options}
             multiSelect={pendingQuestion.multiSelect}
             onAnswer={onAnswerQuestion}
+          />
+        )}
+        {/* 审批卡片同一个位置、同一个理由:这一轮停在等用户批准这一次工具执行上。
+            两张卡结构上不会同时有值(run 串行 await 工具),但各自渲染各自的,不写「二选一」的假设 */}
+        {pendingApproval && (
+          <ApprovalCard
+            key={pendingApproval.approvalId}
+            request={pendingApproval}
+            onDecide={onDecideApproval}
+            onOpenWhitelist={onOpenWhitelist}
           />
         )}
         {/* 输入 / 时弹出 skill 列表;选中后作为标签显示在输入框内 */}
@@ -577,6 +628,7 @@ function ChatPanel({
                       onSelect={onSelectWorkspace}
                       onClear={onClearWorkspace}
                     />
+                    <PermissionPicker permissions={permissions} onChange={onPermissionChange} />
                     {selectable.length > 0 ? (
                       <Select<string>
                         size="small"

@@ -9,7 +9,7 @@ import {
   toIdentifiedMessages
 } from '../../../src/main/agent/history'
 import { SUMMARY_BLOCK_PREFIX, isSummaryBlock, summaryBlock } from '../../../src/main/agent/compact'
-import { SYSTEM_PROMPT } from '../../../src/main/agent/prompt'
+import { SUB_AGENT_SYSTEM_PROMPT, SYSTEM_PROMPT } from '../../../src/main/agent/prompt'
 import { skillRegistry } from '../../../src/main/skills/registry'
 import { agentRegistry } from '../../../src/main/agents/registry'
 import { resetSettings, setSettings } from '../../helpers/settings'
@@ -141,13 +141,15 @@ describe('system prompt 里的工作空间', () => {
 
   it('没选目录时那一段整块不出现:提一个不存在的工作空间会让模型凭空编路径', () => {
     const content = systemPromptMessage().content as string
-    expect(content).not.toContain('工作空间')
+    // 基础提示词里审批那句会提到「工作空间」这个词,所以断言的是那一段标题与实际路径
+    expect(content).not.toContain('## 本次会话的工作空间')
+    expect(content).not.toContain('目录:')
     // 不选也要照旧是系统提示词开头,别让空串插出多余空行
     expect(content.startsWith(SYSTEM_PROMPT)).toBe(true)
   })
 
   it('空白串视为没选', () => {
-    expect(systemPromptMessage('   ').content).not.toContain('工作空间')
+    expect(systemPromptMessage('   ').content).not.toContain('## 本次会话的工作空间')
   })
 
   it('说明那句只讲事实,不含「请在工作空间内操作」这类祈使', () => {
@@ -165,6 +167,19 @@ describe('system prompt 里的工作空间', () => {
   it('buildHistory 把它带进第一条 system:发给模型的历史与送去摘要的是同一份开头', () => {
     const history = buildHistory([], [], '', '/ws')
     expect(history[0].content).toContain('/ws')
+  })
+})
+
+describe('system prompt 里的审批说明', () => {
+  it('写明「被拒绝即操作没有进行」:否则模型会把那条拒绝当工具故障重试', () => {
+    // 拒绝的结论由 chat/approval.ts 写成陈述句,提示词里引的是同一句原话
+    expect(SYSTEM_PROMPT).toContain('用户拒绝了这次操作,操作没有进行')
+    expect(SUB_AGENT_SYSTEM_PROMPT).toContain('用户拒绝了这次操作,操作没有进行')
+  })
+
+  it('那句不随档位变化:写成三种样子会在用户切档时再打掉一次 system 前缀', () => {
+    // 模型需要知道的只有「拒绝是事实」,与当前是哪一档无关
+    expect(SYSTEM_PROMPT).not.toMatch(/询问审批|自动审批|完全访问/)
   })
 })
 

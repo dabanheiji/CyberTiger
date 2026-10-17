@@ -14,6 +14,8 @@ interface ToolCallChainProps {
    * 与 `ReasoningBox` 的 `thinking` 同一个时机,不然思考收起了、工具链还杵在那儿。
    */
   tooling: boolean
+  /** 正等用户批准的那次调用 id;它停在 running 不是执行慢,而是在等人按按钮 */
+  awaitingApprovalCallId?: string
   /** 渲染在参数/结果之后的自定义内容(目前用于子 Agent 的执行过程) */
   renderDetail?: (call: StreamingToolCall) => React.ReactNode
 }
@@ -72,9 +74,11 @@ const STATUS_MAP: Record<StreamingToolCall['status'], 'loading' | 'success' | 'e
 }
 
 /** 状态文案;命中去重缓存时写明,免得看起来像又执行了一遍 */
-function callDescription(call: StreamingToolCall): string {
+function callDescription(call: StreamingToolCall, awaitingApprovalCallId?: string): string {
   // 提问停在「等待」上不是卡住:用户没给选择之前,这一轮本来就走不动
   if (call.status === 'running' && call.name === 'ask_user') return '等待你的回答'
+  // 审批同理:那一次执行还没开始,得等用户在卡片上按
+  if (call.status === 'running' && call.id === awaitingApprovalCallId) return '等待你的审批'
   if (call.status === 'running') return '执行中…'
   if (call.reused) return '已复用本轮结果'
   return call.status === 'error' ? '执行失败' : '已完成'
@@ -125,7 +129,12 @@ function defaultExpandedKeys(calls: StreamingToolCall[]): string[] {
  * 整条链包在一个可折叠的框里,正在执行时摊开、正文开始输出时自动收起(用户仍可点开回看)。
  * 运行中的调用与带子 Agent 过程的调用默认展开,普通调用默认收起;之后不自动收起,交给用户切换。
  */
-function ToolCallChain({ calls, tooling, renderDetail }: ToolCallChainProps): React.JSX.Element {
+function ToolCallChain({
+  calls,
+  tooling,
+  awaitingApprovalCallId,
+  renderDetail
+}: ToolCallChainProps): React.JSX.Element {
   const { token } = theme.useToken()
   const preStyle = makePreStyle(token)
   const autoKeys = defaultExpandedKeys(calls)
@@ -150,7 +159,7 @@ function ToolCallChain({ calls, tooling, renderDetail }: ToolCallChainProps): Re
   const items: ThoughtChainProps['items'] = calls.map((c) => ({
     key: c.id,
     title: callTitle(c),
-    description: callDescription(c),
+    description: callDescription(c, awaitingApprovalCallId),
     status: STATUS_MAP[c.status],
     collapsible: true,
     content: (

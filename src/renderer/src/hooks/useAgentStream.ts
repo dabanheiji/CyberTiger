@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { IpcResult } from '../../../main/chat/dto'
+import type { ApprovalRequest, IpcResult, PendingApprovalDto } from '../../../main/chat/dto'
 import type { ModelRef } from '../../../main/store/types'
 import { ensureStep, mapCall, mapStep, type AgentStep } from '../lib/agentSteps'
 
@@ -26,6 +26,11 @@ export interface StreamingRun {
    * 清掉它的时机是同一次调用的 tool_result 到手,而不是提交动作本身 —— 提交失败时卡片得留下。
    */
   pendingQuestion: PendingQuestion | null
+  /**
+   * 有值就是模型正等着用户批准一次操作(run 阻塞在那次工具执行上)。
+   * 与 pendingQuestion 同一条纪律:收起它的时机是同一次调用的 tool_result,不是按下按钮那次。
+   */
+  pendingApproval: ApprovalRequest | null
 }
 
 interface UseAgentStreamOptions {
@@ -36,10 +41,23 @@ interface UseAgentStreamOptions {
 
 interface UseAgentStreamResult {
   streaming: StreamingRun | null
+  /**
+   * 不属于界面上正在跟踪的那个 run 的审批请求。
+   *
+   * 渲染层重载(Cmd+R)之后事件订阅是新的、流式状态也归零,而主进程那一边仍然阻塞在一次
+   * 工具执行上 —— 那时界面上没有任何地方能回答它。靠主进程的等待表把卡片填回来。
+   */
+  detachedApproval: PendingApprovalDto | null
   /** 启动 Agent run,返回 IPC 结果;成功后开始接收流式事件 */
   start: (conversationId: string, ref: ModelRef) => Promise<IpcResult<{ runId: string }>>
   /** 中止当前 run */
   abort: () => Promise<void>
+  /**
+   * 重读一次主进程的等待表。
+   * 挂载、切会话、以及把决定送出去之后各调一次:后一次让卡片立刻收起,
+   * 不等那次 tool_result —— 审批已了结这件事本身就是等待表里没这条的原因。
+   */
+  refreshApprovals: (conversationId: string) => Promise<void>
 }
 
 /**
@@ -48,6 +66,8 @@ interface UseAgentStreamResult {
  */
 export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamResult {
   const [streaming, setStreaming] = useState<StreamingRun | null>(null)
+  // 等待表里读来的、当前界面没法挂到流式状态上的那条审批(见 UseAgentStreamResult 注释)
+  const [detachedApproval, setDetachedApproval] = useState<PendingApprovalDto | null>(null)
   // 事件监听器里读取最新值,避免闭包拿到过期 state
   const streamingRef = useRef<StreamingRun | null>(null)
   const optionsRef = useRef(options)
@@ -108,7 +128,10 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
             })),
             // 那次提问有了结(用户答了、跳了、或本轮中止),卡片就该收起
             pendingQuestion:
-              current.pendingQuestion?.callId === event.callId ? null : current.pendingQuestion
+              current.pendingQuestion?.callId === event.callId ? null : current.pendingQuestion,
+            // 审批同理:批没批、超时还是中止,那次调用的结果一到,卡片就没有留下的理由
+            pendingApproval:
+              current.pendingApproval?.callId === event.callId ? null : current.pendingApproval
           })
           return
         case 'ask_user':
@@ -122,6 +145,11 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
               multiSelect: event.multiSelect
             }
           })
+          return
+        case 'tool_approval':
+          // 这条 case 与 compact 一样是承重的:落到 switch 末尾会把整轮流式状态清空。
+          // 卡片的内容由事件直接给出(主进程那边已经把判定算好了),不等 IPC 回读。
+          update({ ...current, pendingApproval: event.request })
           return
         case 'usage': {
           const steps = ensureStep(current.steps, event.scope, event.messageId)
@@ -160,7 +188,13 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
         model: ref.model
       })
       if (res.success) {
-        update({ conversationId, runId: res.data.runId, steps: [], pendingQuestion: null })
+        update({
+          conversationId,
+          runId: res.data.runId,
+          steps: [],
+          pendingQuestion: null,
+          pendingApproval: null
+        })
       }
       return res
     },
@@ -173,5 +207,23 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
     await window.api.chat.abortReply(current.runId)
   }, [])
 
-  return { streaming, start, abort }
+  const refreshApprovals = useCallback(
+    async (conversationId: string): Promise<void> => {
+      const res = await window.api.chat.pendingApprovals()
+      if (!res.success) return
+      const hit = res.data.find((item) => item.conversationId === conversationId) ?? null
+      const current = streamingRef.current
+      if (current?.conversationId === conversationId) {
+        // 这一轮界面上还在跟:卡片以事件流写进 pendingApproval 的那份为准,这里只补漏
+        if (hit && !current.pendingApproval) update({ ...current, pendingApproval: hit })
+        else if (!hit && current.pendingApproval) update({ ...current, pendingApproval: null })
+        setDetachedApproval(null)
+        return
+      }
+      setDetachedApproval(hit)
+    },
+    [update]
+  )
+
+  return { streaming, detachedApproval, start, abort, refreshApprovals }
 }

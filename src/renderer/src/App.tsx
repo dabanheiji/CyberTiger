@@ -4,7 +4,7 @@ import { App as AntdApp } from 'antd'
 import { XProvider } from '@ant-design/x'
 import antdZhCN from 'antd/locale/zh_CN'
 import xZhCN from '@ant-design/x/locale/zh_CN'
-import type { AppearanceSettings } from '../../main/store/types'
+import type { AppearanceSettings, PermissionSettings } from '../../main/store/types'
 import { useSystemTheme } from './hooks/useSystemTheme'
 import { buildTheme, defaultAccent, focusRing, selectionTint } from './theme'
 import ChatPage from './pages/chat'
@@ -14,19 +14,22 @@ import SettingsPage from './pages/settings'
  * 聊天页始终挂载:它持有会话、流式状态和发送标志,卸载会丢失进行中的回复。
  * 进入设置页时只是把聊天页隐藏。
  *
- * 外观设置只在这条链上传递(App → 设置页 → 外观面板),消费方只有强调色一处,
- * 所以不建 Context,也不新加一条 settings 推事件 —— `settings:*` 本来就是 pull-only。
+ * 外观与权限设置只在这条链上传递(App → 聊天页 / 设置页 → 面板):`settings:*` 本来就是
+ * pull-only、没有 change 事件,所以「谁是当前值」必须只有一处。权限这一档尤其明显 ——
+ * 底栏那颗选择器和设置页的名单编辑写的是同一个键,两处各自读 store 就会出现界面互相打架。
  */
 function Routes(props: {
   appearance: AppearanceSettings
   onAppearanceChange: (next: AppearanceSettings) => void
+  permissions: PermissionSettings
+  onPermissionsChange: (next: PermissionSettings) => void
 }): React.JSX.Element {
   const { pathname } = useLocation()
   const onSettings = pathname === '/settings'
   return (
     <>
       <div style={{ height: '100%', display: onSettings ? 'none' : undefined }}>
-        <ChatPage />
+        <ChatPage permissions={props.permissions} onPermissionsChange={props.onPermissionsChange} />
       </div>
       {onSettings && <SettingsPage {...props} />}
     </>
@@ -36,12 +39,18 @@ function Routes(props: {
 function App(): React.JSX.Element {
   const isDark = useSystemTheme()
   const [appearance, setAppearance] = useState<AppearanceSettings>({})
+  const [permissions, setPermissions] = useState<PermissionSettings>({})
 
   // 只在挂载时读一次:明暗模式由主进程落到 nativeTheme,渲染层跟着 media query 走,
-  // 这里要的只是用户自定义的强调色
+  // 这里要的只是用户自定义的强调色;权限同理 —— 档位与名单只由写入方更新,不需要轮询
   useEffect(() => {
     void (async (): Promise<void> => {
-      setAppearance((await window.api.settings.get('appearance')) ?? {})
+      const [nextAppearance, nextPermissions] = await Promise.all([
+        window.api.settings.get('appearance'),
+        window.api.settings.get('permissions')
+      ])
+      setAppearance(nextAppearance ?? {})
+      setPermissions(nextPermissions ?? {})
     })()
   }, [])
 
@@ -62,7 +71,12 @@ function App(): React.JSX.Element {
     <XProvider locale={{ ...antdZhCN, ...xZhCN }} theme={themeConfig}>
       <AntdApp style={{ height: '100%' }}>
         <HashRouter>
-          <Routes appearance={appearance} onAppearanceChange={setAppearance} />
+          <Routes
+            appearance={appearance}
+            onAppearanceChange={setAppearance}
+            permissions={permissions}
+            onPermissionsChange={setPermissions}
+          />
         </HashRouter>
       </AntdApp>
     </XProvider>

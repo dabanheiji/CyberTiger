@@ -28,6 +28,16 @@ export function getAllTools(): ToolDefinition[] {
 }
 
 /**
+ * 当前由 MCP server 提供的工具名。
+ *
+ * 审批判定要靠它区分「外部代码」那一档:光看名字里有没有 `__` 是把 sanitize 的编码规则
+ * 当类型用,而 `getAllTools()` 与它是同一时刻读 `mcpManager`,不会有快照错位。
+ */
+export function getMcpToolNames(): Set<string> {
+  return new Set(mcpManager.getTools().map((t) => t.name))
+}
+
+/**
  * 一次 run 可用的工具集合。
  * 查找与执行都被限制在构造时给定的 definitions 内,而不是全局注册表 —— 这既是
  * 上下文隔离(子 agent 拿不到 task 等),也是安全边界(模型幻觉出的未授权工具名

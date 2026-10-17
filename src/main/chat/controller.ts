@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, type IpcMainInvokeEvent } from 'electron'
+import { BrowserWindow, dialog, Notification, type IpcMainInvokeEvent } from 'electron'
 import {
   createFirstMessage,
   listConversations,
@@ -10,6 +10,8 @@ import {
   abortReply as abortReplyService,
   compactConversationManually,
   answerQuestion as answerQuestionService,
+  decideApproval as decideApprovalService,
+  pendingApprovals as listPendingApprovals,
   hasActiveWork,
   setConversationWorkspace
 } from './service'
@@ -21,6 +23,9 @@ import type {
   compactDto,
   setWorkspaceDto,
   answerQuestionDto,
+  ApprovalRequest,
+  decideApprovalDto,
+  PendingApprovalDto,
   ChatStreamEvent,
   CompactReport,
   IpcResult
@@ -89,7 +94,18 @@ export function generateReply(
     // 窗口已关闭时不再推送,但落库照常完成
     if (!e.sender.isDestroyed()) e.sender.send('chat:stream', event)
   }
-  return run(() => ({ runId: generateReplyService(dto, emit) }))
+  /**
+   * 审批在等而窗口没在前台:来一条系统通知并把窗口叫回来。
+   * 用户可能在别的应用里,而这一整轮正停在他身上 —— 没有这一步,审批看起来就像 Agent 卡死,
+   * 而他会去做别的事。提问不需要这一条(它本来就期望用户此刻就在输入区)。
+   */
+  const notify = (request: ApprovalRequest): void => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win.isFocused() || win.isDestroyed()) return
+    new Notification({ title: 'CyberTiger 在等你审批', body: request.summary }).show()
+    win.focus()
+  }
+  return run(() => ({ runId: generateReplyService(dto, emit, notify) }))
 }
 
 export function abortReply(_e: IpcMainInvokeEvent, runId: string): IpcResult<null> {
@@ -163,4 +179,26 @@ export function answerQuestion(_e: IpcMainInvokeEvent, dto: answerQuestionDto): 
     answerQuestionService(dto.questionId, dto.answers)
     return null
   })
+}
+
+/**
+ * 把用户的决定交回给正阻塞着的工具调用。
+ *
+ * 与 answerQuestion 同一条纪律:id 对不上就报错,不静默丢 —— 静默失败看起来就是「按钮没反应」。
+ * 拒绝与允许都照样了结这次等待,区别只在工具运没运行;超时与中止由主进程那侧自己收场,
+ * 那时这条决定会拿到「已经失效了」的报错,界面据此收起卡片。
+ */
+export function decideApproval(_e: IpcMainInvokeEvent, dto: decideApprovalDto): IpcResult<null> {
+  return run(() => {
+    decideApprovalService(dto)
+    return null
+  })
+}
+
+/**
+ * 当前还挂着的审批请求。
+ * 渲染层重载(或它先于本次 run 的事件订阅就绪)时拉一次,把卡片填回来。
+ */
+export function pendingApprovals(): IpcResult<PendingApprovalDto[]> {
+  return run(() => listPendingApprovals())
 }

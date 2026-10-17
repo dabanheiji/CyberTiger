@@ -2,7 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { App, theme } from 'antd'
 import type { Conversation, Message } from '../../../../main/chat/sql'
-import type { AppSettings, ModelProvider, ModelRef } from '../../../../main/store/types'
+import type { ApprovalOutcome } from '../../../../main/chat/dto'
+import type {
+  AppSettings,
+  ModelProvider,
+  ModelRef,
+  PermissionSettings
+} from '../../../../main/store/types'
 import { normalizeRef } from '../../../../main/store/modelRef'
 import { compactResultLine } from '../../lib/contextUsage'
 import { pushRecent } from '../../lib/workspace'
@@ -10,7 +16,21 @@ import Sidebar from './Sidebar'
 import ChatPanel from './ChatPanel'
 import { useAgentStream } from '../../hooks/useAgentStream'
 
-function ChatPage(): React.JSX.Element {
+interface ChatPageProps {
+  /** 全局权限设置(档位 + 名单);真值在 App,写入也经 App 下传的那颗 setter */
+  permissions: PermissionSettings
+  onPermissionsChange: (next: PermissionSettings) => void
+}
+
+/**
+ * 会话标题,取不到时给一句不指名的说法。
+ * 「在等你回答」与「在等你审批」两句共用;做成模块级纯函数是为了不进任何 effect 的依赖数组。
+ */
+function titleOf(conversations: Conversation[], conversationId: string): string {
+  return conversations.find((c) => c.id === conversationId)?.title ?? '另一个对话'
+}
+
+function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JSX.Element {
   const { message, modal } = App.useApp()
   const { token } = theme.useToken()
   const navigate = useNavigate()
@@ -35,6 +55,14 @@ function ChatPage(): React.JSX.Element {
 
   const openSettings = useCallback((): void => {
     navigate('/settings')
+  }, [navigate])
+
+  /**
+   * 审批卡片上那个「加入白名单」:直接落到设置页的「权限」那一栏。
+   * 只跳转不就地写名单 —— 名单有一处编辑面就够,两处会互相盖。
+   */
+  const openPermissionSettings = useCallback((): void => {
+    navigate('/settings?tab=permission')
   }, [navigate])
 
   const refreshConversations = useCallback(async (): Promise<void> => {
@@ -74,8 +102,10 @@ function ChatPage(): React.JSX.Element {
 
   const {
     streaming,
+    detachedApproval,
     start: startReply,
-    abort: abortReply
+    abort: abortReply,
+    refreshApprovals
   } = useAgentStream({
     onDone: finishReply,
     onError: async (conversationId, msg) => {
@@ -133,6 +163,22 @@ function ChatPage(): React.JSX.Element {
     setCurrentRef(ref)
     try {
       await window.api.settings.set('currentModel', ref)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /**
+   * 换权限档位(卡片上的「加入白名单」跳到设置页,名单在那里改)。
+   *
+   * 先更新 App 那一份状态再写 store:`settings:*` 只有 pull 没有 push,
+   * 界面若等一次回读才更新,底栏那颗就会在一次点击之后停在旧档位上。
+   * 主进程侧下一轮 run 读到的就是这个键;正在跑的那一轮按「收紧立即、放宽下一轮」处理。
+   */
+  const handlePermissionChange = async (next: PermissionSettings): Promise<void> => {
+    onPermissionsChange(next)
+    try {
+      await window.api.settings.set('permissions', next)
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err))
     }
@@ -265,6 +311,34 @@ function ChatPage(): React.JSX.Element {
     if (!res.success) message.error(res.msg)
   }
 
+  /** 只把属于当前会话的流式内容交给面板,切走时不显示 */
+  const shownRun = streaming?.conversationId === activeId ? streaming : null
+
+  /**
+   * 当前会话要显示的审批请求:优先正在跟踪的那一轮,其次是从主进程等待表拉回来的那条
+   * (`detachedApproval` 只在「这一条属于当前显示的会话、但界面已经不在跟那个 run」时有值,
+   * 典型场景是渲染层重载 —— 订阅是新的、流式状态归零,而主进程还阻塞在那次工具调用上)。
+   */
+  const shownApproval = shownRun?.pendingApproval ?? detachedApproval
+
+  /**
+   * 把用户的决定交回主进程:那边正阻塞在同一次工具调用上,决定到手这一轮才继续。
+   *
+   * 送完一定重读一次等待表。成功时不必等那次 tool_result(等待表里已经没这条,卡片该立刻收),
+   * 失败时(id 已失效 —— 刚超时、刚被中止,或渲染层重载期间用户按了两次)更要重读,
+   * 否则卡片会留在一个再也送不出去的决定上。
+   */
+  const handleDecideApproval = async (outcome: ApprovalOutcome, reason: string): Promise<void> => {
+    if (!shownApproval) return
+    const res = await window.api.chat.decideApproval({
+      approvalId: shownApproval.approvalId,
+      outcome,
+      ...(reason ? { reason } : {})
+    })
+    if (!res.success) message.error(res.msg)
+    await refreshApprovals(activeIdRef.current ?? '')
+  }
+
   /**
    * 提问也可能来自后台会话(切换会话不影响正在跑的 run)。
    * 卡片只在当前会话显示,所以那边在等的时候提一句是哪个对话,否则用户只看到一个
@@ -276,10 +350,31 @@ function ChatPage(): React.JSX.Element {
     if (!pending || !streaming || pending.questionId === warnedQuestionRef.current) return
     warnedQuestionRef.current = pending.questionId
     if (streaming.conversationId === activeIdRef.current) return
-    const title =
-      conversations.find((c) => c.id === streaming.conversationId)?.title ?? '另一个对话'
-    message.warning(`「${title}」在等你回答`)
+    message.warning(`「${titleOf(conversations, streaming.conversationId)}」在等你回答`)
   }, [streaming, conversations, message])
+
+  /**
+   * 审批在等的提示与提问同一条:每个请求只提一次。
+   * 差别在于审批更急 —— 窗口没在前台时主进程还会发一条系统通知,那是同一件事的另一面。
+   */
+  const warnedApprovalRef = useRef('')
+  useEffect(() => {
+    const pending = streaming?.pendingApproval
+    if (!pending || !streaming || pending.approvalId === warnedApprovalRef.current) return
+    warnedApprovalRef.current = pending.approvalId
+    if (streaming.conversationId === activeIdRef.current) return
+    message.warning(`「${titleOf(conversations, streaming.conversationId)}」在等你审批`)
+  }, [streaming, conversations, message])
+
+  /**
+   * 挂载与切会话时重读主进程的审批等待表。
+   *
+   * 渲染层重载(Cmd+R)之后事件订阅是全新的、流式状态也归零,而主进程仍阻塞在那次工具调用上:
+   * 不拉这一次,界面上就没有任何地方能回答它,那一轮连同这个会话一起卡死(切目录与手动压缩都进不去)。
+   */
+  useEffect(() => {
+    void refreshApprovals(activeId ?? '')
+  }, [activeId, refreshApprovals])
 
   /**
    * 手动压缩当前会话的上下文。
@@ -343,9 +438,6 @@ function ChatPage(): React.JSX.Element {
     })
   }
 
-  /** 只把属于当前会话的流式内容交给面板,切走时不显示 */
-  const shownRun = streaming?.conversationId === activeId ? streaming : null
-
   return (
     <div
       style={{
@@ -370,6 +462,8 @@ function ChatPage(): React.JSX.Element {
         messages={messages}
         streaming={shownRun}
         pendingQuestion={shownRun?.pendingQuestion ?? null}
+        pendingApproval={shownApproval}
+        permissions={permissions}
         isDraft={activeId === null}
         sending={sending}
         providers={providers}
@@ -380,6 +474,9 @@ function ChatPage(): React.JSX.Element {
         onSend={handleSend}
         onCancel={handleCancel}
         onAnswerQuestion={(answers) => void handleAnswerQuestion(answers)}
+        onPermissionChange={(next) => void handlePermissionChange(next)}
+        onDecideApproval={(outcome, reason) => void handleDecideApproval(outcome, reason)}
+        onOpenWhitelist={openPermissionSettings}
         onCompact={() => void handleCompact()}
         onModelChange={handleModelChange}
         onOpenSettings={openSettings}
