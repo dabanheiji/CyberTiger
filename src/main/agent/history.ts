@@ -122,11 +122,22 @@ export function toIdentifiedMessages(
  *
  * workspace 排在这些目录之前:一个 run 的工作空间在 startRun 就固定,
  * 所以这段文字在整轮里是常量,而 skill 目录可能中途被用户启停。
+ *
+ * `confined` / `execConfined` 两个默认 false 是同一条守卫:接线漏了只会少说一句,
+ * 不会谎报「有边界」。`buildHistory` 那条路(尺寸估算与退化路径)不传,理由见 prompt.ts。
  */
-export function systemPromptMessage(workspace = '', confined = false): ChatCompletionMessage {
+export function systemPromptMessage(
+  workspace = '',
+  confined = false,
+  execConfined = false
+): ChatCompletionMessage {
   return {
     role: 'system',
-    content: SYSTEM_PROMPT + workspaceNote(workspace, confined) + skillsCatalog() + agentsCatalog()
+    content:
+      SYSTEM_PROMPT +
+      workspaceNote(workspace, confined, execConfined) +
+      skillsCatalog() +
+      agentsCatalog()
   }
 }
 

@@ -11,6 +11,7 @@ import { initAgents } from './agents/controller'
 import { migrateSettings } from './store/migrate'
 import { store } from './store'
 import { applyThemeSource } from './appearance'
+import { engineProbe } from './sandbox/preflight'
 import { loadWindowState, trackWindowState } from './window-state'
 
 /**
@@ -129,6 +130,10 @@ app.whenReady().then(() => {
   initAgents()
 
   createWindow()
+
+  // 预热受限执行的引擎探针:那是一次 100–500ms 的 spawn,不该出现在「按下发送」的路径上。
+  // 结论在进程内不刷新,所以中途装了 bwrap 要重启应用才认(设置页那一栏明写这一句)。
+  void engineProbe()
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the

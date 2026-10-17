@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { get, getAll, set, remove } from '../store/controller'
+import { get, getAll, set, remove, sandboxStatus } from '../store/controller'
 import {
   sendFirstMessage,
   getAllConversations,
@@ -29,6 +29,8 @@ export function registerIpc(): void {
   ipcMain.handle('settings:getAll', getAll)
   ipcMain.handle('settings:set', set)
   ipcMain.handle('settings:remove', remove)
+  // 沙箱的引擎状态不是设置值,是一次探针的结论:同一条 settings:* 例外(返回原始值、不套 IpcResult)
+  ipcMain.handle('settings:sandboxStatus', sandboxStatus)
 
   ipcMain.handle('chat:sendFirstMessage', sendFirstMessage)
   ipcMain.handle('chat:getAllConversations', getAllConversations)

@@ -13,7 +13,8 @@ import type { PermissionMode } from '../../../src/main/store/types'
 import { createToolRunner } from '../../../src/main/tools/registry'
 import type { ToolRunner } from '../../../src/main/tools/registry'
 import { readFileTool, writeFileTool } from '../../../src/main/tools/files'
-import type { ToolDefinition } from '../../../src/main/tools/types'
+import type { ExecBoundary } from '../../../src/main/sandbox'
+import type { ToolContext, ToolDefinition } from '../../../src/main/tools/types'
 import {
   makeCall,
   makeEmit,
@@ -56,10 +57,13 @@ interface Options {
   workspace?: string
   /**
    * 一次快照、两处共用:交给 `runAgent`(执行侧)与审批 deps(要不要弹卡片侧)。
-   * 合成一个参数是故意的 —— 生产里 `startRun` 算出来的就是同一个值;分成两个选项的话,
+   * 合成一个选项是故意的 —— 生产里 `startRun` 算出来的就是同一个值;分成两个选项的话,
    * 用例可以让两边给出不同的 jail,界面照样全绿。
+   *
+   * 类型取 `ToolContext['jail']` 而不是 `{ root }`:`exec`(受限执行的启动器)就住在这个对象里,
+   * 写窄了会让「子 run 有没有把 exec 也带上」这一条根本没被类型覆盖。
    */
-  jail?: { root: string }
+  jail?: ToolContext['jail']
   inner: ToolRunner
   scope?: RunScope
 }
@@ -134,9 +138,9 @@ function decide(h: Harness, index: number, outcome: ApprovalOutcome): void {
   }
 }
 
-/** 每次工具执行看到的边界:父子是不是同一份全靠它 */
+/** 每次工具执行看到的边界:父子是不是同一份、exec 有没有跟着一起传全靠它 */
 interface Seen {
-  jail: Array<{ root: string } | undefined>
+  jail: Array<ToolContext['jail']>
   workspace: Array<string | undefined>
 }
 
@@ -208,6 +212,17 @@ function toDefinition(tool: TestTool): ToolDefinition {
 let root = ''
 let outsideDir = ''
 
+/**
+ * 一份「边界装着」的启动器。这一组只验它随**同一个对象**抵达子 run,
+ * 里面那几条参数对不对由 `test/main/sandbox.test.ts` 的 `execFor` 那几组管。
+ */
+const EXEC: ExecBoundary = {
+  state: 'confined',
+  engine: 'seatbelt',
+  allowNetwork: true,
+  launch: { file: '/usr/bin/sandbox-exec', args: ['-p', '(version 1)'], env: { PATH: '/usr/bin' } }
+}
+
 beforeEach(() => {
   // 与生产同一份纪律:根必须 realpath 过,否则 mac 上 `/var → /private/var`
   // 会把根内的路径判成根外
@@ -262,6 +277,27 @@ describe('jail 随工具上下文到达每一次执行', () => {
     expect(subSeen.jail).toEqual([jail])
     expect(subSeen.workspace).toEqual([root])
     expect(h.collected.of('tool_approval')).toHaveLength(0)
+  })
+
+  /**
+   * 受限执行住在 `jail.exec` 里而不是一个新的 `ToolContext` 字段,所以它的继承与根同一条路 ——
+   * 而这条断言要单独钉:只按 `{ root }` 比一下,漏传 `exec` 照样过,而后果是模型走 `task` 派出的子 run
+   * 里 `run_command` 回到不受限地跑(整台机器可写、凭据读得到),那正是这一期要关的那扇门。
+   */
+  it('子 Agent 的 context.jail 与父级是同一个对象、exec 也在其中:启动器不能只装在主 run 身上', async () => {
+    const subSeen = makeSeen()
+    const jail = { root, exec: EXEC }
+    const h = startRun(
+      [
+        { toolCalls: [call('task', { prompt: '在子 run 里跑一条命令' }, 'task-1')] },
+        { content: '子任务回来了' }
+      ],
+      { workspace: root, jail, inner: createToolRunner([makeTaskTool(subSeen)]) }
+    )
+    await h.running
+
+    expect(subSeen.jail[0]).toBe(jail)
+    expect(subSeen.jail[0]?.exec).toBe(EXEC)
   })
 })
 

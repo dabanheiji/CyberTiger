@@ -54,8 +54,19 @@ export const SUB_AGENT_SYSTEM_PROMPT = `你是被主 Agent 派来执行单项任
  * jail 那半句**折在这里而不是另起一节**:它和「有没有工作空间」同一个条件,
  * 而设置页那颗开关本身是低频操作。`confined` 缺省为 false(不声明),所以只有
  * 真传了 jail 的那两个调用点会带上这句;尺寸估算那条路不传,少的是几十 token 量级。
+ *
+ * `execConfined` 是第三个前缀方差来源,它是这次多出来的一句实话:受限执行装着的时候,
+ * `run_command` 的写入也出不了那个目录,而它关掉 / 没选工作空间 / Windows 上仍然不受约束。
+ * 这两个分支必须都在,因为模型读到「命令也受限制」而实际没受限制时会把 EPERM 归错地方 ——
+ * 反过来读到「不受限制」时它会真把机器改了。代价与 `confined` 同一条:沙箱那两颗开关一被推,
+ * 老会话打掉一次前缀。
+ *
+ * 那句「凭据目录读不到」只写在受限执行这一支、且主语是**命令**而不是 `read_file`:
+ * 点名清单拦的是沙箱里的进程,`read_file` 这一期仍然读得到根外的一切(读侧收敛是另一期)。
+ * errno 不写进来 —— mac 给 `Operation not permitted`,Linux 那边被遮的目录根本不存在,
+ * 写死一种就是对着另一台机器说谎。
  */
-export function workspaceNote(dir: string, confined = false): string {
+export function workspaceNote(dir: string, confined = false, execConfined = false): string {
   const trimmed = dir.trim()
   if (!trimmed) return ''
   return (
@@ -63,8 +74,13 @@ export function workspaceNote(dir: string, confined = false): string {
     `目录:${trimmed}\n` +
     'read_file 与 write_file 的相对路径按这个目录解析,run_command 未指定 cwd 时也在该目录下执行;' +
     (confined
-      ? '绝对路径和以 ~ 开头的路径照常解析,但 write_file 落在该目录之外时会被拒绝,' +
-        'read_file 与 run_command 不受这条限制;落在该目录之外时工具结果会附带一条说明。'
+      ? execConfined
+        ? '绝对路径和以 ~ 开头的路径照常解析,但 write_file 落在该目录之外时会被拒绝;' +
+          'run_command 也在受限执行环境里跑,命令的文件写入出不了该目录与临时目录,' +
+          '清单里点名的凭据目录它读不到;read_file 不受这条限制,' +
+          '它落在该目录之外时工具结果会附带一条说明。'
+        : '绝对路径和以 ~ 开头的路径照常解析,但 write_file 落在该目录之外时会被拒绝,' +
+          'read_file 与 run_command 不受这条限制;落在该目录之外时工具结果会附带一条说明。'
       : '绝对路径和以 ~ 开头的路径不受它约束,解析后落在该目录之外时工具结果会附带一条说明。')
   )
 }

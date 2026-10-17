@@ -12,7 +12,7 @@ import type {
   ToolCallRecord,
   TokenUsage
 } from '../chat/dto'
-import type { ToolExecResult, ToolRunner } from '../tools/registry'
+import type { ToolContext, ToolExecResult, ToolRunner } from '../tools/registry'
 import { estimateRequestTokens, estimateTextTokens } from '../tokens/estimate'
 import {
   isSummaryBlock,
@@ -184,11 +184,12 @@ export interface RunAgentParams {
    */
   workspace?: string
   /**
-   * 文件写入 jail:根目录已经过 realpath,空/省略即没开(越界写入退回"照做 + 一行标注")。
-   * 与 workspace 同一条纪律 —— startRun 读一次并随整轮固定,父子 run 传同一份:
-   * 只给主 run 装上,模型走 `task` 派出的子 run 就在边界外写文件,那道闸门等于没设。
+   * 本次 run 的边界:写侧的 jail 根(已经过 realpath)+ `run_command` 的受限执行方式,
+   * 省略整个对象即什么都没开(越界写入退回「照做 + 一行标注」,shell 不套启动器)。
+   * 与 workspace 同一条纪律 —— startRun 读一次并随整轮固定,父子 run 传**同一个对象**:
+   * 只给主 run 装上,模型走 `task` 派出的子 run 就在边界外写文件、不受约束地跑命令,那道闸门等于没设。
    */
-  jail?: { root: string }
+  jail?: ToolContext['jail']
   /** 步数上限;子 agent 通常小于主 agent */
   maxSteps: number
   store: AgentStore

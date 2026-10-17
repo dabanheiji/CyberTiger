@@ -54,7 +54,8 @@ import {
 import { createAskUserTool, type AskUserHandler } from '../agent/ask'
 import { createQuestionGate } from './questions'
 import { workspaceNote } from '../agent/prompt'
-import { jailFor } from '../sandbox'
+import { execFor, jailFor } from '../sandbox'
+import { engineProbe } from '../sandbox/preflight'
 import {
   createTaskTool,
   TASK_TOOL_NAME,
@@ -179,7 +180,7 @@ function withGate(
   approval: ApprovalContext,
   scope: RunScope,
   workspace: string,
-  jail: { root: string } | undefined,
+  jail: ToolContext['jail'],
   emit: (event: ChatStreamEvent) => void,
   signal: AbortSignal
 ): ToolRunner {
@@ -779,7 +780,11 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
           role: 'system',
           content:
             role.systemPrompt +
-            workspaceNote(ctx.workspace, call.jail !== undefined) +
+            workspaceNote(
+              ctx.workspace,
+              call.jail !== undefined,
+              call.jail?.exec?.state === 'confined'
+            ) +
             (canLoadSkills ? skillsCatalog() : '')
         },
         { role: 'user', content: req.prompt }
@@ -904,9 +909,15 @@ async function startRun(input: StartRunInput): Promise<void> {
   // 文件写入 jail 与 workspace 一起拍一次快照(照审批名单那条路,不是档位那种现读):
   // 跑到一半切开关不影响这一轮,而父子 run 必须用同一个根。
   // 建不出根来就整轮不开始 —— 静默退回"没有边界"继续跑,等于让用户以为护栏在。
-  let jail: { root: string } | undefined
+  let jail: ToolContext['jail']
   try {
-    jail = jailFor(store.get('sandbox'), workspace)
+    const root = jailFor(store.get('sandbox'), workspace)
+    // 受限执行挂在同一个 jail 对象上,而不是新开一条线:子 run 复用父级那份 `call.jail`,
+    // 于是「父子同一道边界」这条已有保证自动覆盖 exec;多一个字段就多一处忘的机会。
+    // 探针在启动时已预热过,这里通常只是在读一份 memo 结论,不会把 spawn 挡在发消息前面。
+    jail = root
+      ? { ...root, exec: execFor(store.get('sandbox'), root, await engineProbe()) }
+      : undefined
   } catch (error) {
     emit({ type: 'error', scope, msg: error instanceof Error ? error.message : String(error) })
     return
@@ -969,7 +980,7 @@ async function startRun(input: StartRunInput): Promise<void> {
   const items = toIdentifiedMessages(messages, tools)
   const current = getSummaryState(conversationId).summary
   const history = [
-    systemPromptMessage(workspace, jail !== undefined),
+    systemPromptMessage(workspace, jail !== undefined, jail?.exec?.state === 'confined'),
     ...historyBody(items, current)
   ]
 

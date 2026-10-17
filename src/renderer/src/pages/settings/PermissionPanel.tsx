@@ -75,11 +75,26 @@ function PermissionPanel({ permissions, onChange }: PermissionPanelProps): React
   return (
     <Flex vertical gap="middle" style={{ maxWidth: 760 }}>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        工具执行审批。它<strong>不是</strong>「沙箱」那一档:审批挡的是「模型自己决定做的事」,
-        一次误点允许,命令就真跑出去了。真正拦着写侧的是左边「沙箱」那一栏的路径限制,
-        它不需要你点头;两边都在的那条缺口是 <code>run_command</code>
-        —— 受限执行环境还在后面的期里。
+        工具执行审批。它<strong>不是</strong>「沙箱」那一栏:审批挡的是「模型自己决定做的事」,
+        一次误点允许,命令就真跑出去了。不需要人点头的那道边界在左边「沙箱」那一栏 —— 它在 macOS /
+        Linux 上把文件写入和 shell 命令都收在工作空间与临时目录里。
       </Typography.Paragraph>
+
+      {/* 三处各占一行:挤进同一段会让 JSX 的折行在中文中间留下空格 */}
+      <Flex vertical gap={4}>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          那道边界仍然到不了三处:
+        </Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          ① 工作空间之外的<strong>读</strong>(<code>read_file</code> 照读,只是要弹卡片)
+        </Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          ② <strong>Windows</strong>(那边没有对应的 OS 机制,命令一直不受约束)
+        </Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          ③ <strong>MCP 工具</strong>(不走 <code>write_file</code> 也不走 <code>run_command</code>)
+        </Typography.Text>
+      </Flex>
 
       <Flex vertical gap={token.marginXS}>
         <Typography.Text strong>档位</Typography.Text>

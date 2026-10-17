@@ -5,3 +5,4 @@ coverage
 .DS_Store
 .eslintcache
 *.log*
+vibe_images

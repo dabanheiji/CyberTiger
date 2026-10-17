@@ -1,9 +1,9 @@
 import os from 'os'
-import path from 'path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { augmentPath } from '../sandbox/env'
 import type { ToolDefinition } from '../tools/types'
 import type { McpConfig, McpServerConfig, McpServerStatus, McpToolInfo } from './types'
 
@@ -34,28 +34,12 @@ interface ToolSource {
 
 /**
  * 打包后的 macOS / Linux 应用 PATH 只有系统目录,npx / uvx 等命令找不到。
- * 在 SDK 默认环境基础上追加常见的用户级 bin 目录。
+ * 在 SDK 默认环境基础上追加常见的用户级 bin 目录 —— 那份清单与受限执行用的是同一份
+ * (`sandbox/env.ts`),少一个目录就是沙箱里 `npm` 一律 127。
  */
 function buildEnv(extra?: Record<string, string>): Record<string, string> {
   const env = { ...getDefaultEnvironment(), ...extra }
-  if (process.platform !== 'win32') {
-    const home = os.homedir()
-    const candidates = [
-      '/usr/local/bin',
-      '/opt/homebrew/bin',
-      '/opt/homebrew/sbin',
-      path.join(home, '.local', 'bin'),
-      path.join(home, '.cargo', 'bin'),
-      path.join(home, '.bun', 'bin'),
-      path.join(home, '.nvm', 'current', 'bin'),
-      path.join(home, '.volta', 'bin')
-    ]
-    const current = (env.PATH ?? '').split(':').filter(Boolean)
-    for (const dir of candidates) {
-      if (!current.includes(dir)) current.push(dir)
-    }
-    env.PATH = current.join(':')
-  }
+  env.PATH = augmentPath(env.PATH ?? '', os.homedir())
   return env
 }
 

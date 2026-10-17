@@ -1,6 +1,6 @@
 # CyberTiger
 
-基于 Electron 的桌面 AI 助手：多会话聊天 + ReAct Agent（工具调用）+ Skills（`SKILL.md` 指令插件）+ MCP 工具接入 + 子 Agent 派生 + 上下文预算与压缩 + 三档工具审批与文件写入边界。模型走 OpenAI 兼容接口，服务商可配（兼容 DeepSeek / Ollama / vLLM 等），界面与提示词均为中文。
+基于 Electron 的桌面 AI 助手：多会话聊天 + ReAct Agent（工具调用）+ Skills（`SKILL.md` 指令插件）+ MCP 工具接入 + 子 Agent 派生 + 上下文预算与压缩 + 三档工具审批、文件写入边界与 shell 的 OS 级受限执行。模型走 OpenAI 兼容接口，服务商可配（兼容 DeepSeek / Ollama / vLLM 等），界面与提示词均为中文。
 
 架构、目录与开发约定的完整说明见 [AGENTS.md](./AGENTS.md)。
 
@@ -28,6 +28,7 @@
 - **工程护栏**：命令超时默认 30s（上限 600s）、stdout/stderr 各留末尾 16k 字符、二进制与 >2MB 文件拒绝、中止时杀掉整个进程组、工具执行永不抛错（失败返回给模型自纠）
 - **三档权限模式（审批）**：`ask` 面内全问 / `auto` 只放过证明得了只读的命令 / `full` 面内免审批（黑名单除外）。判定表在 `tools/permission.ts`、只读证明在 `tools/risk.ts`、等待在 `chat/approvals.ts`，执行由 `withApproval` 装饰 ToolRunner 拦住，主 / 子 Agent 走同一道闸门；黑白名单在设置页「权限」栏编辑
 - **文件写入边界（jail）**：选了工作空间的会话里，`write_file` **写不到该目录之外**（绝对路径、`~`、`..`、工作空间内指向外面的软链都会被拒），判定走 `fs.realpath` 而不是文本比较。设置页「沙箱」栏可关闭；`full` 档 + 空名单那条今天也拦不住的路径由它兜住
+- **shell 的受限执行**：同一条边界扩到 `run_command`——macOS 用 `/usr/bin/sandbox-exec` 加生成的 Seatbelt profile，Linux 用 `bwrap`，命令由内核包住：写入只在工作空间与临时目录里，`~/.ssh` / `~/.aws` / `~/.gnupg` / `~/.netrc` / `~/.config/gh` / 钥匙串目录点名读不到，环境变量走一份白名单（`SSH_AUTH_SOCK` 不在内）。启动器装在 `spawn` 的 argv 里而不是命令串里，所以审批的放行键逐字节不变；设置页「沙箱」栏有「受限执行」与「网络」两颗独立开关，Windows 没有对应机制、明写「这台机器上 shell 始终不受边界约束」
 - **工作空间**：每个会话绑定一个目录，底栏可随时选择或清除，最近使用可复用；侧栏会话列表按工作空间分组，未选择工作空间的那批单独成组
 - **Skills**：`SKILL.md` 目录扫描 + frontmatter 校验、渐进式加载（system 里只放目录，模型按需 `load_skill`）、`/` 手动触发、从 GitHub / URL / 本地安装，支持更新与卸载
 - **MCP**：stdio 与 Streamable HTTP 两种传输，配置经 zod 校验，远端工具实时合并进工具池并带连接状态推送
@@ -35,10 +36,14 @@
 
 ## 已知边界
 
-- **写入边界只管「写」**：`write_file` 被收进工作空间，但 `read_file` 仍能读根外文件、`run_command` 完全不受路径约束（`cat ~/.ssh/id_rsa`、`rm -rf` 靠审批拦，不靠边界拦）。OS 级的受限执行（mac `sandbox-exec` / Linux `bwrap`）与读侧收敛还没做
-- **私密文件目前只有提示词层面的约束**：system prompt 第 7 条与 `read_file` / `write_file` / `run_command` 三份描述都写明不碰凭据类文件（私钥与 SSH 配置、云厂商凭据、钥匙串、`.env` 与各类令牌文件），并明写「不要改用 shell 绕开」。这是**措辞不是拦截**——模型可能不听，MCP 工具更不在覆盖范围内，真护栏仍是审批 + 阶段 3 的受限执行
-- **审批不是沙箱**：它决定「问不问」，一次误点允许，命令就带着用户的全部权限真跑出去了
-- **未选工作空间的会话没有边界**：那种会话今天每条越界写都会弹审批（刻意的保守方向），关掉「沙箱」开关同样回到这条路
+- **边界只管「写」，不管「读」**：`write_file` 与 `run_command` 的文件写入都被收在工作空间与临时目录里，但 `read_file` 仍能读根外文件，命令里的读取也只点名了几个凭据目录。读侧收敛（由符号链接 / 硬链接 / `/dev` / `/proc` 构成的最小可执行系统）是另一期
+- **两平台的硬度不一样**：Linux 的 `bwrap --ro-bind / /` 是真·整盘只读，被点名的目录在命令里看着像不存在；macOS 那一份是 `allow default` + 点名 deny，读得到除了清单之外的一切，被挡下时报 `Operation not permitted`。两者都不是白名单式沙箱
+- **凭据清单是人工维护的，注定列不全**：`.env` 故意不在 OS 清单里（工作空间里的 `.env` 是日常要读的），mac 的钥匙串走 `securityd` 那个服务、只 deny 文件路径挡不住 `security find-generic-password`；`read_file` 那一侧仍然只有提示词层面的措辞（system prompt 第 7 条 + 三份工具描述），模型可能不听
+- **Windows 上没有对应机制**：AppContainer 要 native 码、Windows Sandbox 是起一台 VM，所以那一台的 `run_command` 一直不受这道边界约束，设置页按预检结论常驻说明这一点
+- **引擎装不上时只拒 `run_command`**：不整轮报错，也绝不静默退回不受限地跑；设置页写明这条后果
+- **审批不是沙箱**：它决定「问不问」，一次误点允许，命令就带着用户的全部权限真跑出去了。有了受限执行之后，后果从「改了整台机器」退成「改了授权范围内的东西」，而「这台机器上跑的就是模型写的代码」没有变
+- **未选工作空间的会话没有边界**：没有根就没有 jail，也没有受限执行（两者同一个前提）；那种会话今天每条越界写都会弹审批（刻意的保守方向），关掉「沙箱」开关同样回到这条路
+- **MCP 工具完全不在这层覆盖里**：它既不走 `write_file` 也不走 `run_command`，stdio server 的受限启动要单独建模（跨 run 存活、只能现读设置）
 - MCP 工具的结果长度没有统一上限（内置工具各自有上限）
 - 采样参数（temperature / max_tokens / top_p）不可配；`githubToken` 只存在于类型定义与安装器里，设置页没有入口
 - 窗口重载会丢掉正在等待作答的提问，那一轮要直到点停止才收场
@@ -47,14 +52,14 @@
 
 ## Roadmap / TODO
 
-按优先级排列。P0 是**已经在出错的路径**（模型自行决定的写入与 shell），不是锦上添花——它已经兑现了一半，剩下的半截仍排在最前。
+按优先级排列。P0 是**已经在出错的路径**（模型自行决定的写入与 shell），不是锦上添花——写侧那一半现在由内核收着，仍敞着的是读侧、Windows 与 MCP。
 
 ### P0 · 工具审批 + 硬沙箱
 
 - [x] 三档权限模式（`ask` / `auto` / `full`）+ 执行前审批卡片 + 黑白名单（面内为 `run_command` 全部、越出工作空间的读写、MCP 工具）
 - [x] 文件写入边界：`tools/jail.ts` 用 `fs.realpath` 把 `write_file` 收进工作空间，软链与 `..` 都算过真身；根不可用时 fail-closed
-- [ ] `run_command` 的受限执行：macOS `sandbox-exec` / Linux `bwrap` 包住子进程，Windows 平台无对应机制（要明写「本平台上 shell 仍不受限」）
-- [ ] 读侧收敛：`read_file` 与 shell 的读取要限制在由符号链接 / 硬链接 / `/dev` / `/proc` 构成的最小可执行系统内——只做路径检查注定漏，所以排在受限执行之后一起设计
+- [x] `run_command` 的受限执行：macOS 生成 Seatbelt profile 交给 `/usr/bin/sandbox-exec`，Linux 用 `bwrap`，启动器装在 argv 里（所以审批的放行键不变）；Windows 无对应机制，设置页明写「这台机器上 shell 仍不受限」；引擎装不上时直接拒绝该工具而不是退回不受限地跑
+- [ ] 读侧收敛：`read_file` 与 shell 的读取要限制在由符号链接 / 硬链接 / `/dev` / `/proc` 构成的最小可执行系统内——只做路径检查注定漏，受限执行已经把「整盘可写」收成「两个目录可写」，这一条是它的另一半
 - [ ] `deny` 名单的路径粒度（现在只能按命令前缀 / 工具名匹配；写侧已由 jail 消解，读侧仍是缺口）
 - [ ] MCP stdio server 也走受限启动（它跨 run 存活、只能现读设置，与工具那一层的 run 快照是两条路，要分开建模）
 - [ ] 统一在 loop / runner 层的工具结果上限（含 MCP 工具）
@@ -125,7 +130,7 @@ npm run dev
 ### Quality Gates
 
 ```bash
-npm test              # vitest：790 用例 / 45 文件（主进程纯逻辑 + Agent 行为 + SQL 与迁移 + 渲染层纯函数）
+npm test              # vitest：874 用例 / 49 文件（主进程纯逻辑 + Agent 行为 + SQL 与迁移 + 渲染层纯函数 + mac 真实 Seatbelt 拦截）
 npm run test:coverage # vitest + v8 覆盖率（范围见 vitest.config.ts）
 npm run typecheck     # 双 tsconfig：main/preload + renderer
 npm run lint          # ESLint 9 flat config（基线非零，改动不应新增 error）

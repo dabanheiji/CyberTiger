@@ -111,9 +111,35 @@ describe('jail 开着时,审批为写入边界让位', () => {
     ).toBe(false)
   })
 
-  it('run_command 也不改:受限执行还在下一期,工作目录越界照样要问', () => {
+  it('run_command 也不改:jail 只装在 spawn 那一侧,判定表问的还是「要不要问」', () => {
     expect(asks({ mode: 'ask', jail: JAIL, args: { command: 'ls', cwd: '/tmp' } })).toBe(true)
     expect(asks({ mode: 'auto', jail: JAIL, args: { command: 'ls', cwd: '/tmp' } })).toBe(true)
+  })
+
+  it('受限执行不进判定表:同一命令带与不带 exec,整份审批载荷逐字节相同', () => {
+    // 启动器进 argv 而不拼进命令串,为的就是这一条:放行键算的是模型给出的那条命令,
+    // 一旦把 `/usr/bin/sandbox-exec -p …` 混进去,每个 cwd 都会变成新的一类,
+    // 「本轮不再问」立刻失效,而界面卡片上印的也不再是用户批准过的那一句
+    const confined = {
+      root: WS,
+      exec: {
+        state: 'confined' as const,
+        engine: 'seatbelt' as const,
+        allowNetwork: true,
+        launch: {
+          file: '/usr/bin/sandbox-exec',
+          args: ['-p', '(allow default)'],
+          env: { PATH: '/usr/bin' }
+        }
+      }
+    }
+    const input = { mode: 'ask' as PermissionMode, args: { command: 'git push', cwd: '/tmp' } }
+    const without = needsApproval(query({ ...input, jail: JAIL }))
+    const withExec = needsApproval(query({ ...input, jail: confined }))
+    expect(withExec).not.toBeNull()
+    expect(without?.runAllowKey).toBe(withExec?.runAllowKey)
+    expect(without?.summary).toBe(withExec?.summary)
+    expect(without?.detail).toEqual(withExec?.detail)
   })
 
   it('没给根时判定与今天完全一致,连载荷都不变:关掉开关要回到逐条问,而不是两边都不管', () => {

@@ -43,7 +43,10 @@ export interface ApprovalQuery {
   workspace: string
   /**
    * 文件写入 jail 的根;有根即 jail 开着。它在这里**只用来决定要不要问**,
-   * 真正的执行边界在 `tools/jail.ts` 与 `tools/files.ts` 那一侧 —— 这一层从不拦操作。
+   * 真正的执行边界在 `tools/jail.ts`、`tools/files.ts` 与 `tools/shell.ts` 那一侧 ——
+   * 这一层从不拦操作,也**不读 `exec`**:受限执行装在 spawn 的 argv 里而不是命令串里,
+   * 所以这一格带不带 exec、带哪一种 exec,审批结论与放行键都必须一模一样
+   * (单测钉住了这一条)。
    * 这里只当一个字符串用(**不做任何 IO**),所以这张判定表仍然能脱离应用跑单测;
    * 越界与锚定也继续用纯文本的 `anchor`:jail 那边是另一套判定(realpath),
    * 两套不互抄,于是有两种不对称都站在不打谎那侧 ——

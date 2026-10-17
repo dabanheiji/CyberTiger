@@ -36,6 +36,8 @@ export interface ApprovalDeps {
   /**
    * 文件写入 jail 的根,与 `workspace` 一样是 startRun 拍的一次快照(不是档位那种现读)。
    * 有根就意味着根外的写入注定被工具拒绝 —— 审批让位,不弹一件注定失败的事。
+   * 类型只要 `root`,所以调用方传来的那份带 `exec`(受限执行的启动方式)照样合适:
+   * 闸门这一侧**不看 exec**,批准的是模型写下的那条命令本身,不是它被怎么包起来跑。
    */
   jail?: { root: string }
   scope: RunScope

@@ -9,7 +9,11 @@ import {
   toIdentifiedMessages
 } from '../../../src/main/agent/history'
 import { SUMMARY_BLOCK_PREFIX, isSummaryBlock, summaryBlock } from '../../../src/main/agent/compact'
-import { SUB_AGENT_SYSTEM_PROMPT, SYSTEM_PROMPT } from '../../../src/main/agent/prompt'
+import {
+  SUB_AGENT_SYSTEM_PROMPT,
+  SYSTEM_PROMPT,
+  workspaceNote
+} from '../../../src/main/agent/prompt'
 import { readFileTool, writeFileTool } from '../../../src/main/tools/files'
 import { runCommandTool } from '../../../src/main/tools/shell'
 import { skillRegistry } from '../../../src/main/skills/registry'
@@ -169,6 +173,53 @@ describe('system prompt 里的工作空间', () => {
   it('buildHistory 把它带进第一条 system:发给模型的历史与送去摘要的是同一份开头', () => {
     const history = buildHistory([], [], '', '/ws')
     expect(history[0].content).toContain('/ws')
+  })
+})
+
+/**
+ * 那一句有三种样子(什么都没开 / 只开写侧 jail / 还开了受限执行),而每一种都得是真话。
+ * 这里断的是**分支之间必须不同**:接线把 `execConfined` 传漏了就只会少说一句(与 `confined`
+ * 缺省 false 同一条保守方向),但把「不受限制」说成「受限制」同样要把 EPERM 归错地方 ——
+ * 两种错都只在这三个分支互相比对时才显形。
+ */
+describe('工作空间那一句按边界装有几种说法', () => {
+  it('什么都没开:两条边界都不提,越界只标注', () => {
+    const note = workspaceNote('/ws')
+    expect(note).toContain('不受它约束')
+    expect(note).not.toContain('被拒绝')
+    expect(note).not.toContain('受限执行')
+  })
+
+  it('只开写侧 jail 时 run_command 仍然写「不受这条限制」:这一句到今天还是真的', () => {
+    const note = workspaceNote('/ws', true)
+    expect(note).toContain('write_file 落在该目录之外时会被拒绝')
+    expect(note).toContain('run_command 不受这条限制')
+    expect(note).not.toContain('受限执行')
+  })
+
+  it('受限执行装着时那一句必须改口:谎报「不受限制」等于把边界交给模型的直觉', () => {
+    const note = workspaceNote('/ws', true, true)
+    expect(note).not.toContain('run_command 不受这条限制')
+    expect(note).toContain('受限执行环境')
+    expect(note).toContain('命令的文件写入出不了该目录与临时目录')
+    // 读侧这一期没收:跟着一起改口就是另一种谎,所以那句的主语必须是 read_file
+    expect(note).toContain('read_file 不受这条限制')
+    expect(note).toContain('凭据目录它读不到')
+  })
+
+  it('systemPromptMessage 把第三个参数一路带到那一句:service.ts 只在这一层能被验到', () => {
+    expect(systemPromptMessage('/ws', true, true).content).toContain('受限执行环境')
+    expect(systemPromptMessage('/ws', true).content).not.toContain('受限执行环境')
+  })
+
+  it('三种说法都不含祈使:模型会把「请换个写法」当成本轮待办去执行', () => {
+    for (const note of [
+      workspaceNote('/ws'),
+      workspaceNote('/ws', true),
+      workspaceNote('/ws', true, true)
+    ]) {
+      expect(note).not.toMatch(/请|务必|必须|应该|不要|改用|换用/)
+    }
   })
 })
 

@@ -1,4 +1,5 @@
 import type OpenAI from 'openai'
+import type { ExecBoundary } from '../sandbox'
 
 /** 一次工具调用的上下文,由 Agent loop 在调用点注入 */
 export interface ToolContext {
@@ -21,12 +22,15 @@ export interface ToolContext {
    */
   workspace?: string
   /**
-   * 文件写入 jail 的根(**已 realpath 过**的工作空间目录)。
-   * 省略即没开 jail:越界写入照旧成功,只在结果末尾标注一句。
-   * 一期只约束 `write_file` 的写侧 —— 读侧与 `run_command` 都还不收(见「沙箱」设置页),
-   * 所以这里只有一个 root,不预留网络与环境那些没人消费的字段。
+   * 本次 run 的边界:`root` 是**已 realpath 过**的工作空间目录,`exec` 是 `run_command`
+   * 的受限执行方式。省略整个对象即什么都没开:越界写入照旧成功(只在结果末尾标注一句),
+   * shell 也不套启动器。
+   *
+   * 两者装在同一个对象上是刻意的:它由 `startRun` 一次算出、随 `ToolContext` 透传,
+   * 子 run 复用父级那一份(`agent/task.ts`)。多一个字段就多一处「接线时忘了带」的机会,
+   * 而这一处忘掉的后果是命令不受边界约束地跑起来。
    */
-  jail?: { root: string }
+  jail?: { root: string; exec?: ExecBoundary }
 }
 
 /** 一个可供模型调用的本地工具 */

@@ -103,7 +103,7 @@ export interface PermissionSettings {
 }
 
 /**
- * 「沙箱」设置:一期只有一项。与 `appearance` / `permissions` 同一条纪律,
+ * 「沙箱」设置:写侧边界一颗、受限执行两颗。与 `appearance` / `permissions` 同一条纪律,
  * 整体一个键写入、不进 defaults、不走迁移。
  */
 export interface SandboxSettings {
@@ -113,6 +113,40 @@ export interface SandboxSettings {
    * `false` 只关掉文件写入的边界约束,不影响审批。
    */
   enabled?: boolean
+  /**
+   * `run_command` 的 OS 级受限执行(mac 的 sandbox-exec / Linux 的 bwrap)。缺省即**开**,
+   * 与 `enabled` 同一条纪律;`false` 只放开 shell,文件写入的边界仍然装着。
+   * 两颗开关分开是因为「想让构建命令写到工作空间外」不该顺手把写侧护栏也关掉。
+   * Windows 没有对应机制,这一颗在那台机器上不起作用(界面按预检结论明写)。
+   */
+  exec?: boolean
+  /**
+   * 受限执行里放不放行网络。缺省即**放行** —— 这一颗的方向与安全无关,是对「缺省即最保守」
+   * 那条纪律的一次公开例外:装包、拉代码、curl 都靠它,关掉之后那些命令全挂。
+   * 代价要在设置页写清:拦不住「把仓库内容外传」这条路,这道边界管文件,不管数据出境。
+   */
+  network?: boolean
+}
+
+/**
+ * 这台机器上用哪种机制做受限执行。`'none'` 是**没有这种机制**(Windows),不是「起失败了」——
+ * 消费者按 `engine` 分支,别按 `available` 分支,后者在 `'none'` 那一支也是 `true`。
+ */
+export type SandboxEngine = 'seatbelt' | 'bwrap' | 'none'
+
+/**
+ * `settings:sandboxStatus` 的载荷:引擎预检结论 + 平台。
+ *
+ * 放在这一层是因为它跨进程(`SandboxPanel` 要显示),与 `SandboxSettings` 同一个理由;
+ * 生成它的逻辑在 `sandbox/preflight.ts`,那边只认这份类型的 `Omit<..., 'platform'>`。
+ */
+export interface SandboxExecStatus {
+  platform: string
+  engine: SandboxEngine
+  /** false = 开着沙箱时 `run_command` 不执行,而不是静默退回不受限地跑 */
+  available: boolean
+  /** 面向用户的一句实话:不可用的原因,或「这台机器没有这种机制」 */
+  reason?: string
 }
 
 export interface AppSettings {
