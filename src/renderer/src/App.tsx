@@ -1,9 +1,10 @@
 import { HashRouter, useLocation } from 'react-router'
-import { App as AntdApp, theme } from 'antd'
+import { App as AntdApp } from 'antd'
 import { XProvider } from '@ant-design/x'
 import antdZhCN from 'antd/locale/zh_CN'
 import xZhCN from '@ant-design/x/locale/zh_CN'
 import { useSystemTheme } from './hooks/useSystemTheme'
+import { darkTheme, lightTheme } from './theme'
 import ChatPage from './pages/chat'
 import SettingsPage from './pages/settings'
 
@@ -28,10 +29,7 @@ function App(): React.JSX.Element {
   const isDark = useSystemTheme()
 
   return (
-    <XProvider
-      locale={{ ...antdZhCN, ...xZhCN }}
-      theme={{ algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm }}
-    >
+    <XProvider locale={{ ...antdZhCN, ...xZhCN }} theme={isDark ? darkTheme : lightTheme}>
       <AntdApp style={{ height: '100%' }}>
         <HashRouter>
           <Routes />

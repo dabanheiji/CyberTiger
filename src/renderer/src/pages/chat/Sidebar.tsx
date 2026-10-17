@@ -134,10 +134,12 @@ function Sidebar({
         flexShrink: 0,
         display: 'flex',
         flexDirection: 'column',
-        background: token.colorBgContainer,
-        borderRight: `1px solid ${token.colorBorderSecondary}`
+        // 侧栏是凹陷的一层,与根容器同底色;与画布的分界靠色差而不是 1px 边框
+        background: token.colorBgLayout
       }}
     >
+      {/* 顶栏那条空白带:侧栏底色一直铺到窗口上沿,红绿灯浮在它上面,空白处可拖动窗口 */}
+      <div className="cybertiger-titlebar-drag" />
       <Conversations
         style={{ flex: 1, minHeight: 0 }}
         // 组标签要有 ellipsis 就得参与父级 flex 的宽度链,见 assets/main.css 的说明

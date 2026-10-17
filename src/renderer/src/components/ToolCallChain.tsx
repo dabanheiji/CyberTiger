@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { ThoughtChain, Think } from '@ant-design/x'
 import type { ThoughtChainProps } from '@ant-design/x'
 import { ToolOutlined } from '@ant-design/icons'
-import { Typography } from 'antd'
+import { Typography, theme } from 'antd'
+import type { GlobalToken } from 'antd'
 import type { StreamingToolCall } from '../lib/agentSteps'
 
 interface ToolCallChainProps {
@@ -88,13 +89,24 @@ function prettyJson(raw: string): string {
   }
 }
 
-const preStyle: React.CSSProperties = {
-  margin: 0,
-  maxHeight: 200,
-  overflow: 'auto',
-  whiteSpace: 'pre-wrap',
-  wordBreak: 'break-all',
-  fontSize: 12
+/**
+ * 工具的参数与结果是一块「数据」,不是正文:给它底色、细边框与圆角,和助手的话分开。
+ * 裸 <pre> 在气泡背景上没有任何边界,长结果会和正文混成一片。
+ */
+function makePreStyle(token: GlobalToken): React.CSSProperties {
+  return {
+    margin: 0,
+    padding: '8px 10px',
+    maxHeight: 200,
+    overflow: 'auto',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all',
+    fontSize: 12,
+    fontFamily: token.fontFamilyCode,
+    background: token.colorFillQuaternary,
+    border: `1px solid ${token.colorBorderSecondary}`,
+    borderRadius: token.borderRadiusSM
+  }
 }
 
 /**
@@ -114,6 +126,8 @@ function defaultExpandedKeys(calls: StreamingToolCall[]): string[] {
  * 运行中的调用与带子 Agent 过程的调用默认展开,普通调用默认收起;之后不自动收起,交给用户切换。
  */
 function ToolCallChain({ calls, tooling, renderDetail }: ToolCallChainProps): React.JSX.Element {
+  const { token } = theme.useToken()
+  const preStyle = makePreStyle(token)
   const autoKeys = defaultExpandedKeys(calls)
   const signature = autoKeys.join(',')
   const [expandedKeys, setExpandedKeys] = useState<string[]>(autoKeys)

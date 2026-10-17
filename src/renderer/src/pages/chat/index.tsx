@@ -347,7 +347,15 @@ function ChatPage(): React.JSX.Element {
   const shownRun = streaming?.conversationId === activeId ? streaming : null
 
   return (
-    <div style={{ display: 'flex', height: '100%', background: token.colorBgLayout }}>
+    <div
+      style={{
+        display: 'flex',
+        height: '100%',
+        background: token.colorBgLayout
+        // 顶栏预留不在这里:那样整条上沿都是侧栏底色,白画布上会多一条带。
+        // 改由侧栏与画布各铺一条同底色的空白带,见 Sidebar / ChatPanel
+      }}
+    >
       <Sidebar
         conversations={conversations}
         activeId={activeId}

@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Bubble, Sender, Suggestion, Welcome } from '@ant-design/x'
 import type { BubbleListProps } from '@ant-design/x'
 import XMarkdown from '@ant-design/x-markdown'
 import { Avatar, Button, Dropdown, Flex, Popover, Progress, Select, Space, Tag, theme } from 'antd'
-import type { MenuProps } from 'antd'
+import type { GlobalToken, MenuProps } from 'antd'
 import {
   FolderOpenOutlined,
   FolderOutlined,
@@ -89,30 +89,40 @@ interface ChatPanelProps {
 const isEmptyStep = (s: AgentStep): boolean =>
   !s.content && !s.reasoning && s.toolCalls.length === 0
 
-// 按消息 role 映射气泡样式;自定义角色名 'assistant' 直接作为 key
-const roles: BubbleListProps['role'] = {
-  user: {
-    placement: 'end',
-    shape: 'corner',
-    avatar: <Avatar icon={<UserOutlined />} />,
-    contentRender: (msg: UserBubbleContent) => (
-      <>
-        {!!msg.skill && (
-          <Tag icon={<ThunderboltOutlined />} color="geekblue" style={{ marginBottom: 4 }}>
-            {msg.skill}
-          </Tag>
-        )}
-        <XMarkdown content={msg.content} />
-      </>
-    )
-  },
-  assistant: {
-    placement: 'start',
-    variant: 'outlined',
-    avatar: <Avatar icon={<RobotOutlined />} />,
-    contentRender: (msg: AssistantBubbleContent) => (
-      <AgentSteps steps={msg.steps} streaming={msg.streaming} contextWindow={msg.contextWindow} />
-    )
+/**
+ * 按消息 role 映射气泡样式;自定义角色名 'assistant' 直接作为 key。
+ * 做成工厂是因为 user 气泡的底色要读 token(强调色最淡的那一档),模块级常量拿不到。
+ * 调用点用 useMemo 兜住:输入框每敲一个字都会重渲染本组件,新建的对象会让
+ * Bubble.List 认不出 role 没变,把所有气泡连 Markdown 一起重渲一遍。
+ */
+function makeRoles(token: GlobalToken): BubbleListProps['role'] {
+  return {
+    user: {
+      placement: 'end',
+      shape: 'corner',
+      avatar: <Avatar icon={<UserOutlined />} />,
+      styles: { content: { background: token.colorPrimaryBg } },
+      contentRender: (msg: UserBubbleContent) => (
+        <>
+          {!!msg.skill && (
+            <Tag icon={<ThunderboltOutlined />} color="geekblue" style={{ marginBottom: 4 }}>
+              {msg.skill}
+            </Tag>
+          )}
+          <XMarkdown content={msg.content} />
+        </>
+      )
+    },
+    assistant: {
+      placement: 'start',
+      // 无描边:助手正文直接落在画布上。再套一层 outlined 边框,等于把里面的思考框与
+      // 工具链又框一遍,读起来是"框里套框"
+      variant: 'borderless',
+      avatar: <Avatar icon={<RobotOutlined />} />,
+      contentRender: (msg: AssistantBubbleContent) => (
+        <AgentSteps steps={msg.steps} streaming={msg.streaming} contextWindow={msg.contextWindow} />
+      )
+    }
   }
 }
 
@@ -360,6 +370,7 @@ function ChatPanel({
   onClearWorkspace
 }: ChatPanelProps): React.JSX.Element {
   const { token } = theme.useToken()
+  const roles = useMemo(() => makeRoles(token), [token])
   const [value, setValue] = useState('')
   // 通过 / 选中的 skill,发送后清空
   const [activeSkill, setActiveSkill] = useState<string | null>(null)
@@ -422,7 +433,18 @@ function ChatPanel({
   }
 
   return (
-    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+    <div
+      style={{
+        flex: 1,
+        minWidth: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        // 聊天画布是中间那层海拔:比侧栏亮一档,浮层再靠阴影抬起来
+        background: token.colorBgContainer
+      }}
+    >
+      {/* 画布这一列的同色顶栏带:win/linux 的窗口按钮叠层就压在这条上,所以看不出接缝 */}
+      <div className="cybertiger-titlebar-drag" />
       <div style={{ flex: 1, minHeight: 0, display: 'flex', padding: token.padding }}>
         {isDraft ? (
           <div style={{ margin: 'auto', width: '100%', maxWidth: 720 }}>

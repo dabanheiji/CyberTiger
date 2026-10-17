@@ -2,12 +2,26 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>Electron</title>
+    <title>CyberTiger</title>
     <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:"
     />
+    <!--
+      首帧底色:React 挂载前 body 是透明的,露出的是窗口默认白底,深色模式下会闪一下白。
+      两个值与 theme.ts 的 colorBgLayout 对应(浅 #F5F4F1 / 深 #161513),改那边要改这里。
+    -->
+    <style>
+      html {
+        background: #f5f4f1;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: #161513;
+        }
+      }
+    </style>
   </head>
 
   <body>

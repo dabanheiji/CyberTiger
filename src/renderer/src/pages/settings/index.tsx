@@ -18,34 +18,45 @@ function SettingsPage(): React.JSX.Element {
   const [activeKey, setActiveKey] = useState('model')
 
   return (
-    <div style={{ height: '100%', overflow: 'auto', background: token.colorBgLayout }}>
-      <div style={{ maxWidth: 880, margin: '0 auto', padding: token.paddingLG }}>
-        <Button
-          type="text"
-          icon={<ArrowLeftOutlined />}
-          onClick={() => navigate('/')}
-          style={{ marginBottom: token.marginXS }}
-        >
-          返回对话
-        </Button>
+    <div
+      style={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        background: token.colorBgLayout
+      }}
+    >
+      {/* 无边框顶栏:设置页也要这条带,否则「返回对话」按钮正压在红绿灯的位置上 */}
+      <div className="cybertiger-titlebar-drag" />
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        <div style={{ maxWidth: 880, margin: '0 auto', padding: token.paddingLG }}>
+          <Button
+            type="text"
+            icon={<ArrowLeftOutlined />}
+            onClick={() => navigate('/')}
+            style={{ marginBottom: token.marginXS }}
+          >
+            返回对话
+          </Button>
 
-        <Tabs
-          activeKey={activeKey}
-          onChange={setActiveKey}
-          items={[
-            { key: 'model', label: '模型服务', children: <ProvidersPanel /> },
-            { key: 'mcp', label: 'MCP 服务', children: <McpConfigEditor /> },
-            { key: 'skills', label: 'Skills', children: <SkillsPanel /> },
-            { key: 'agents', label: '子 Agent', children: <AgentsPanel /> }
-          ]}
-          // 分区内容可能很长,滚动时让 tab 栏留在视野内
-          tabBarStyle={{
-            position: 'sticky',
-            top: 0,
-            zIndex: 1,
-            background: token.colorBgLayout
-          }}
-        />
+          <Tabs
+            activeKey={activeKey}
+            onChange={setActiveKey}
+            items={[
+              { key: 'model', label: '模型服务', children: <ProvidersPanel /> },
+              { key: 'mcp', label: 'MCP 服务', children: <McpConfigEditor /> },
+              { key: 'skills', label: 'Skills', children: <SkillsPanel /> },
+              { key: 'agents', label: '子 Agent', children: <AgentsPanel /> }
+            ]}
+            // 分区内容可能很长,滚动时让 tab 栏留在视野内
+            tabBarStyle={{
+              position: 'sticky',
+              top: 0,
+              zIndex: 1,
+              background: token.colorBgLayout
+            }}
+          />
+        </div>
       </div>
     </div>
   )

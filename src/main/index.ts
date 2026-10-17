@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, nativeTheme } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -11,6 +11,37 @@ import { initAgents } from './agents/controller'
 import { migrateSettings } from './store/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
 
+/**
+ * 顶栏预留高度。与 renderer `main.css` 的 `--cybertiger-titlebar-inset` 同值 ——
+ * 跨进程没有共享常量,改一处要改两处。
+ */
+const TITLEBAR_HEIGHT = 38
+
+/** 窗口底色与顶栏配色。三个值取自 theme.ts 的 colorBgLayout / colorBgContainer / colorTextBase */
+function chromeColors(dark: boolean): { background: string; container: string; text: string } {
+  return dark
+    ? { background: '#161513', container: '#1F1E1B', text: '#F0EDE6' }
+    : { background: '#F5F4F1', container: '#FFFFFF', text: '#211F1C' }
+}
+
+/**
+ * 标题栏交回系统画:mac 用 hiddenInset 保留红绿灯(嵌进内容区),win/linux 用叠层画窗口按钮。
+ * 不自绘按钮,所以读屏、高对比度主题与 Win11 贴靠布局都仍由系统负责,也不新增任何 window:* IPC。
+ */
+function titleBarOptions(): Electron.BrowserWindowConstructorOptions {
+  if (process.platform === 'darwin') return { titleBarStyle: 'hiddenInset' }
+  const colors = chromeColors(nativeTheme.shouldUseDarkColors)
+  return {
+    titleBarStyle: 'hidden',
+    // 叠层压在聊天画布那一列的上沿,底色取 colorBgContainer 才看不出接缝
+    titleBarOverlay: {
+      color: colors.container,
+      symbolColor: colors.text,
+      height: TITLEBAR_HEIGHT
+    }
+  }
+}
+
 function createWindow(): void {
   // 上次退出时的窗口大小/位置;没有记录时用默认尺寸
   const state = loadWindowState()
@@ -22,6 +53,9 @@ function createWindow(): void {
     ...(state.x !== undefined && state.y !== undefined ? { x: state.x, y: state.y } : {}),
     show: false,
     autoHideMenuBar: true,
+    // 首帧底色:React 挂载前露出的是窗口底色,深色主题下不指定就会闪一下白
+    backgroundColor: chromeColors(nativeTheme.shouldUseDarkColors).background,
+    ...titleBarOptions(),
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -30,6 +64,20 @@ function createWindow(): void {
   })
 
   trackWindowState(mainWindow)
+
+  // 运行中切系统主题:底色与 win/linux 的按钮叠层都得跟着换,否则顶栏留一条旧色的带
+  nativeTheme.on('updated', () => {
+    if (mainWindow.isDestroyed()) return
+    const colors = chromeColors(nativeTheme.shouldUseDarkColors)
+    mainWindow.setBackgroundColor(colors.background)
+    if (process.platform !== 'darwin') {
+      mainWindow.setTitleBarOverlay({
+        color: colors.container,
+        symbolColor: colors.text,
+        height: TITLEBAR_HEIGHT
+      })
+    }
+  })
 
   mainWindow.on('ready-to-show', () => {
     // 先还原最大化再显示,避免先闪一下普通尺寸

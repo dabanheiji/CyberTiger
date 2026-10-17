@@ -30,6 +30,7 @@
     "@codemirror/lang-json": "^6.0.2",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
+    "@fontsource/inter": "^5.3.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@uiw/react-codemirror": "^4.25.11",
     "adm-zip": "^0.6.1",
