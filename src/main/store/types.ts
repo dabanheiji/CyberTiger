@@ -60,6 +60,24 @@ export interface ModelRef {
   model: string
 }
 
+/**
+ * 明暗模式。`'system'` 是默认值,也是「不覆盖」的意思。
+ * 由主进程写成 `nativeTheme.themeSource`,于是 CSS 的 `prefers-color-scheme` 与
+ * `shouldUseDarkColors` 一起翻转,渲染层那套读 media query 的逻辑不用改。
+ */
+export type ThemeMode = 'system' | 'light' | 'dark'
+
+/** 「外观」设置:整体一个键,子字段各自可选 */
+export interface AppearanceSettings {
+  /** 缺省即 `'system'` */
+  mode?: ThemeMode
+  /**
+   * 强调色 `#RRGGBB`,明暗共用一个,深色下由渲染层按明度区间自动调亮。
+   * 缺省即 `theme.ts` 的 `DEFAULT_ACCENT`(虎橙)。
+   */
+  accent?: string
+}
+
 export interface AppSettings {
   /** 模型服务商列表 */
   providers?: ModelProvider[]
@@ -80,6 +98,11 @@ export interface AppSettings {
   workspaceRecent?: string[]
   /** 是否允许主 Agent 派生子 Agent;未设置视为允许 */
   enableSubAgent?: boolean
+  /**
+   * 外观:明暗模式与自定义强调色。未设置即跟随系统 + 默认强调色。
+   * `mode` 由主进程在启动与写入时应用到 `nativeTheme`,`accent` 只在渲染层生效。
+   */
+  appearance?: AppearanceSettings
   /**
    * @deprecated 上下文窗口已经下放到每个模型(ModelConfig.contextWindow)。
    * 仅 migrateSettings 会读它并搬进当前选中的模型,新代码一律按模型取。

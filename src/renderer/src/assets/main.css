@@ -84,32 +84,35 @@ pre {
   background-color: rgba(127, 123, 116, 0.55);
 }
 
-/* 选区色用强调色的淡染;两个值与 theme.ts 的 ACCENT_LIGHT / ACCENT_DARK 对应 */
+/*
+ * 选区色用强调色的淡染。颜色由 App.tsx 从 theme.ts 算好写成变量(用户可自定义强调色),
+ * 兜底值是 theme.ts 的默认那一对:#D9480F / #FF922B —— JS 还没跑的首帧也得有颜色。
+ */
 ::selection {
-  background: rgba(217, 72, 15, 0.2);
+  background: var(--cybertiger-accent-selection, rgba(217, 72, 15, 0.2));
 }
 
 @media (prefers-color-scheme: dark) {
   ::selection {
-    background: rgba(255, 146, 43, 0.28);
+    background: var(--cybertiger-accent-selection, rgba(255, 146, 43, 0.28));
   }
 }
 
 /*
  * 焦点环只给「不是 antd 画的」可聚焦元素(主要是 Markdown 正文里的链接)。
  * antd 控件自己画焦点态(Input.activeShadow / Select.activeOutlineColor 已在 theme.ts
- * 里染成强调色),全局再来一圈就会看到两个环。
+ * 里染成强调色),全局再来一圈就会看到两个环。兜底值同上,与 theme.ts 的默认强调色对应。
  */
 a:focus-visible,
 [tabindex]:focus-visible:not([class*='ant-']) {
-  outline: 2px solid rgba(217, 72, 15, 0.55);
+  outline: 2px solid var(--cybertiger-accent-focus, rgba(217, 72, 15, 0.55));
   outline-offset: 2px;
 }
 
 @media (prefers-color-scheme: dark) {
   a:focus-visible,
   [tabindex]:focus-visible:not([class*='ant-']) {
-    outline-color: rgba(255, 146, 43, 0.65);
+    outline-color: var(--cybertiger-accent-focus, rgba(255, 146, 43, 0.65));
   }
 }
 

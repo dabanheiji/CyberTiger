@@ -38,4 +38,16 @@ export const net = {
     globalThis.fetch(input, init)
 }
 
-export default { app, net }
+/**
+ * `themeSource` 是可写的,所以 `applyThemeSource` 的映射能直接被断言。
+ * `shouldUseDarkColors` 保持常量:替身没有真正的系统外观,测「手动模式落到哪」就够了。
+ */
+export const nativeTheme = {
+  themeSource: 'system',
+  shouldUseDarkColors: false,
+  on(event: string, handler: () => void): void {
+    listeners.set(event, [...(listeners.get(event) ?? []), handler])
+  }
+}
+
+export default { app, net, nativeTheme }

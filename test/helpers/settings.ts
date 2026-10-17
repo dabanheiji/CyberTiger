@@ -12,6 +12,7 @@ export function resetSettings(): void {
   store.delete('disabledSkills')
   store.delete('disabledAgents')
   store.delete('enableSubAgent')
+  store.delete('appearance')
   store.delete('windowState')
 }
 

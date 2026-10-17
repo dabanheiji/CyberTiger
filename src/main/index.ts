@@ -9,6 +9,8 @@ import { mcpManager } from './mcp/manager'
 import { initSkills } from './skills/controller'
 import { initAgents } from './agents/controller'
 import { migrateSettings } from './store/migrate'
+import { store } from './store'
+import { applyThemeSource } from './appearance'
 import { loadWindowState, trackWindowState } from './window-state'
 
 /**
@@ -117,6 +119,9 @@ app.whenReady().then(() => {
   ipcMain.on('ping', () => console.log('pong'))
   // 先迁移配置结构,后面的初始化与窗口都按新结构读
   migrateSettings()
+  // 明暗模式必须早于建窗:窗口底色与 win/linux 的顶栏叠层读的就是 shouldUseDarkColors,
+  // 晚设会先闪一下系统配色的底
+  applyThemeSource(store.get('appearance')?.mode)
 
   registerIpc()
   initMcp()
