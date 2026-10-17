@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import { confine } from './jail'
 import { annotate, anchor, describeFsError, statIfExists } from './paths'
 import type { ToolDefinition } from './types'
 
@@ -43,7 +44,8 @@ export const readFileTool: ToolDefinition = {
     '结尾会写明实际读取的绝对路径与行数。' +
     '文件较长时只返回从 offset 行起的一段,并说明已读到第几行、下一段该从哪行继续。' +
     "只处理文本:二进制文件,以及超过 2 MB 的大文件会被拒绝,后者改用 run_command 按行取片段(如 sed -n '1,200p')。" +
-    '解析出的路径若在工作空间之外,结果末尾会附带一条说明。',
+    '解析出的路径若在工作空间之外,结果末尾会附带一条说明。' +
+    '用户的凭据与私密文件(私钥与 SSH 配置、云厂商凭据、钥匙串、.env 与各类令牌文件)不读。',
   parameters: {
     type: 'object',
     properties: {
@@ -126,7 +128,8 @@ export const writeFileTool: ToolDefinition = {
     '写入字节数,以及覆盖模式下原先有多大内容。' +
     'content 是整份正文且必填,缺省时调用直接被拒绝 —— 那等于把文件清空。' +
     '二进制文件(图片、压缩包等)不用本工具。' +
-    '解析出的路径若在工作空间之外,结果末尾会附带一条说明。',
+    '解析出的路径若在工作空间之外,结果末尾会附带一条说明。' +
+    '用户的凭据与私密文件不改动(私钥与 SSH 配置、authorized_keys、云厂商凭据、钥匙串、.env 与各类令牌文件)。',
   parameters: {
     type: 'object',
     properties: {
@@ -144,7 +147,9 @@ export const writeFileTool: ToolDefinition = {
     }
     const workspace = context.workspace ?? ''
     const target = anchor(raw, workspace)
-    const filePath = target.path
+    // jail 开着时,判完就用解出来的真身去做后面每一步 —— 拿字形路径去 open 等于白判:
+    // 字形落在根内、真身在根外的软链,内核走的是软链那头。没开则一字不改,越界照写。
+    const filePath = context.jail ? confine(target.path, context.jail.root) : target.path
     const append = args.append === true
 
     const existing = await statIfExists(filePath)
@@ -152,10 +157,19 @@ export const writeFileTool: ToolDefinition = {
 
     try {
       await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
-      await fs.promises.writeFile(filePath, args.content, {
-        encoding: 'utf8',
-        flag: append ? 'a' : 'w'
-      })
+      // 不用 writeFile:它只给一个 flag,挡不住"最终组件在判定之后被人换成软链"。
+      // O_NOFOLLOW 让 open 自己拒绝跟随;win 的 libuv 不提供这个常量,缺省即 0(不挡)。
+      const flags =
+        fs.constants.O_WRONLY |
+        fs.constants.O_CREAT |
+        (append ? fs.constants.O_APPEND : fs.constants.O_TRUNC) |
+        (fs.constants.O_NOFOLLOW ?? 0)
+      const handle = await fs.promises.open(filePath, flags)
+      try {
+        await handle.writeFile(args.content, 'utf8')
+      } finally {
+        await handle.close()
+      }
     } catch (error) {
       throw new Error(`写入 ${filePath} 失败:${describeFsError(error)}`)
     }

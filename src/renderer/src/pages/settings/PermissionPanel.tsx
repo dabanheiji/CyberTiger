@@ -75,9 +75,10 @@ function PermissionPanel({ permissions, onChange }: PermissionPanelProps): React
   return (
     <Flex vertical gap="middle" style={{ maxWidth: 760 }}>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        工具执行审批。这<strong>不是沙箱</strong>
-        :审批挡的是「模型自己决定做的事」,一次误点允许,命令就真跑出去了。
-        真正的工作空间限制与受限执行环境还在后面的期里。
+        工具执行审批。它<strong>不是</strong>「沙箱」那一档:审批挡的是「模型自己决定做的事」,
+        一次误点允许,命令就真跑出去了。真正拦着写侧的是左边「沙箱」那一栏的路径限制,
+        它不需要你点头;两边都在的那条缺口是 <code>run_command</code>
+        —— 受限执行环境还在后面的期里。
       </Typography.Paragraph>
 
       <Flex vertical gap={token.marginXS}>

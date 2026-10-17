@@ -20,6 +20,13 @@ export interface ToolContext {
    * 固定一次,父子 agent 共用同一份,免得中途换目录把已发出的相对路径变成另一套含义。
    */
   workspace?: string
+  /**
+   * 文件写入 jail 的根(**已 realpath 过**的工作空间目录)。
+   * 省略即没开 jail:越界写入照旧成功,只在结果末尾标注一句。
+   * 一期只约束 `write_file` 的写侧 —— 读侧与 `run_command` 都还不收(见「沙箱」设置页),
+   * 所以这里只有一个 root,不预留网络与环境那些没人消费的字段。
+   */
+  jail?: { root: string }
 }
 
 /** 一个可供模型调用的本地工具 */

@@ -26,10 +26,14 @@ export interface Anchored {
  * 把模型给的路径锚定到会话工作空间:绝对路径原样,`~` 前缀优先展开,
  * 其余按工作空间解析;没有工作空间时退回应用当前目录(即没这功能之前的行为)。
  *
- * outside 用 resolve + relative 的**纯文本**判断,不引 fs.realpath:
- * macOS 上 `/tmp` 是 `/private/tmp` 的软链,工作空间或路径只要有一边经过软链,
- * realpath 才认得出是同一个目录 —— 但它要为每次调用多一次 IO 和一套失败分支,
- * 而判错的代价只是多写一行标注,不影响能不能读到文件。这个取舍值得这么换。
+ * outside 用 resolve + relative 的**纯文本**判断,不引 fs.realpath:这一套判定只服务
+ * 「审批要不要问」与「结果里要不要标注」,判错的代价只是多一行字或多一次卡片。
+ * macOS 上 `/tmp` 是 `/private/tmp` 的软链,路径只要有一边经过软链,realpath 才认得出
+ * 是同一个目录 —— 但它要为每次调用多一次 IO 和一套失败分支,对这个代价不值得。
+ *
+ * **写入边界不在这里判。** jail 用的是 `tools/jail.ts`,它必须走 realpath:判错的代价
+ * 变成了逃出边界、改了机器上的文件。两套判定并存且**不得互抄** —— 把纯文本那套搬去
+ * jail 就是软链逃逸,把 realpath 搬来这里只是给每次标注白加 IO。
  */
 export function anchor(target: string, workspace: string): Anchored {
   const dir = workspace.trim()
@@ -60,7 +64,9 @@ const ERRNO_HINTS: Record<string, string> = {
   ENAMETOOLONG: '路径过长',
   EROFS: '目标在只读文件系统上',
   EBUSY: '目标正被占用',
-  EMFILE: '打开的文件过多'
+  EMFILE: '打开的文件过多',
+  // 写入不跟随最终软链(见 files.ts 的 O_NOFOLLOW),所以这个码会真的出现
+  ELOOP: '路径的最后一段是软链,而写入不跟随软链'
 }
 
 /** 把 fs 错误转成面向模型的中文说明(带原始 message,里面通常有出问题的路径) */

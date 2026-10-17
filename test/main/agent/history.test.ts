@@ -10,6 +10,8 @@ import {
 } from '../../../src/main/agent/history'
 import { SUMMARY_BLOCK_PREFIX, isSummaryBlock, summaryBlock } from '../../../src/main/agent/compact'
 import { SUB_AGENT_SYSTEM_PROMPT, SYSTEM_PROMPT } from '../../../src/main/agent/prompt'
+import { readFileTool, writeFileTool } from '../../../src/main/tools/files'
+import { runCommandTool } from '../../../src/main/tools/shell'
 import { skillRegistry } from '../../../src/main/skills/registry'
 import { agentRegistry } from '../../../src/main/agents/registry'
 import { resetSettings, setSettings } from '../../helpers/settings'
@@ -180,6 +182,37 @@ describe('system prompt 里的审批说明', () => {
   it('那句不随档位变化:写成三种样子会在用户切档时再打掉一次 system 前缀', () => {
     // 模型需要知道的只有「拒绝是事实」,与当前是哪一档无关
     expect(SYSTEM_PROMPT).not.toMatch(/询问审批|自动审批|完全访问/)
+  })
+})
+
+describe('system prompt 里的凭据与私密文件禁令', () => {
+  it('主 / 子 Agent 两份都写明,且清单具体到路径:泛指「私密文件」小模型判不出边界', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      expect(prompt).toContain('凭据与私密文件')
+      expect(prompt).toContain('~/.ssh')
+      expect(prompt).toContain('.env')
+    }
+  })
+
+  it('写明「也不改用 shell 命令绕开」:只禁 read_file 的话,cat ~/.ssh/id_rsa 仍从另一条路走出去', () => {
+    // 这正是本期 jail 管不到的那一侧 —— 读侧与 shell 都还没被结构性收住
+    expect(SYSTEM_PROMPT).toMatch(/shell 命令\(cat、grep/)
+    expect(SUB_AGENT_SYSTEM_PROMPT).toMatch(/shell 命令\(cat、grep/)
+  })
+
+  it('子 Agent 那份要把缺口写回结论:它面前没有用户,静默跳过会让主 Agent 以为做成了', () => {
+    expect(SUB_AGENT_SYSTEM_PROMPT).toMatch(/写进结论/)
+  })
+
+  it('主 Agent 那份留一条「用户明确点名某个文件时照做」:否则「看下我的 ~/.zshrc」这类请求会被凭空拒掉', () => {
+    expect(SYSTEM_PROMPT).toContain('明确点名')
+  })
+
+  it('三个文件 / shell 工具的描述里也各带一句:工具描述每步整份下发、比 system 更靠近,两处口径必须一致', () => {
+    // 见 AGENTS.md「给模型看的文案」那条 —— 冲突时更具体的那份赢,只写 system 等于没写
+    expect(readFileTool.description).toContain('凭据与私密文件')
+    expect(writeFileTool.description).toContain('凭据与私密文件')
+    expect(runCommandTool.description).toContain('凭据与私密文件')
   })
 })
 

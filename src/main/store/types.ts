@@ -102,6 +102,19 @@ export interface PermissionSettings {
   acknowledgeFullAccess?: boolean
 }
 
+/**
+ * 「沙箱」设置:一期只有一项。与 `appearance` / `permissions` 同一条纪律,
+ * 整体一个键写入、不进 defaults、不走迁移。
+ */
+export interface SandboxSettings {
+  /**
+   * 缺省即**开**(选了工作空间的会话):与「缺键即最严」那条纪律一致 ——
+   * 老用户的配置文件里没有这一键,而 jail 正是那道更严的护栏。
+   * `false` 只关掉文件写入的边界约束,不影响审批。
+   */
+  enabled?: boolean
+}
+
 export interface AppSettings {
   /** 模型服务商列表 */
   providers?: ModelProvider[]
@@ -132,6 +145,11 @@ export interface AppSettings {
    * 一次 run 开始时读一次并随整轮固定(收紧立即、放宽下一轮),详见 `chat/service.ts`。
    */
   permissions?: PermissionSettings
+  /**
+   * 文件路径 jail:写入限制在会话工作空间内。未设置即为开(见 `SandboxSettings`)。
+   * 一次 run 开始时和 `workspace` 一起读一次,跑到一半换设置不影响这一轮。
+   */
+  sandbox?: SandboxSettings
   /**
    * @deprecated 上下文窗口已经下放到每个模型(ModelConfig.contextWindow)。
    * 仅 migrateSettings 会读它并搬进当前选中的模型,新代码一律按模型取。

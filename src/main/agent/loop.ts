@@ -183,6 +183,12 @@ export interface RunAgentParams {
    * 中途换目录会让上一轮已发出的相对路径变成另一套含义。父子 run 传同一份。
    */
   workspace?: string
+  /**
+   * 文件写入 jail:根目录已经过 realpath,空/省略即没开(越界写入退回"照做 + 一行标注")。
+   * 与 workspace 同一条纪律 —— startRun 读一次并随整轮固定,父子 run 传同一份:
+   * 只给主 run 装上,模型走 `task` 派出的子 run 就在边界外写文件,那道闸门等于没设。
+   */
+  jail?: { root: string }
   /** 步数上限;子 agent 通常小于主 agent */
   maxSteps: number
   store: AgentStore
@@ -363,7 +369,8 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
           (await params.runner.execute(call.name, call.arguments, {
             callId: call.id,
             signal,
-            workspace: params.workspace
+            workspace: params.workspace,
+            jail: params.jail
           }))
         if (!cached) toolCache.set(key, exec)
         const toolMessageId = store.addToolMessage(scope, call.id, exec.result)

@@ -123,10 +123,10 @@ export function toIdentifiedMessages(
  * workspace 排在这些目录之前:一个 run 的工作空间在 startRun 就固定,
  * 所以这段文字在整轮里是常量,而 skill 目录可能中途被用户启停。
  */
-export function systemPromptMessage(workspace = ''): ChatCompletionMessage {
+export function systemPromptMessage(workspace = '', confined = false): ChatCompletionMessage {
   return {
     role: 'system',
-    content: SYSTEM_PROMPT + workspaceNote(workspace) + skillsCatalog() + agentsCatalog()
+    content: SYSTEM_PROMPT + workspaceNote(workspace, confined) + skillsCatalog() + agentsCatalog()
   }
 }
 

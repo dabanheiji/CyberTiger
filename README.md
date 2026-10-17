@@ -1,6 +1,6 @@
 # CyberTiger
 
-基于 Electron 的桌面 AI 助手：多会话聊天 + ReAct Agent（工具调用）+ Skills（`SKILL.md` 指令插件）+ MCP 工具接入 + 子 Agent 派生 + 上下文预算与压缩。模型走 OpenAI 兼容接口，服务商可配（兼容 DeepSeek / Ollama / vLLM 等），界面与提示词均为中文。
+基于 Electron 的桌面 AI 助手：多会话聊天 + ReAct Agent（工具调用）+ Skills（`SKILL.md` 指令插件）+ MCP 工具接入 + 子 Agent 派生 + 上下文预算与压缩 + 三档工具审批与文件写入边界。模型走 OpenAI 兼容接口，服务商可配（兼容 DeepSeek / Ollama / vLLM 等），界面与提示词均为中文。
 
 架构、目录与开发约定的完整说明见 [AGENTS.md](./AGENTS.md)。
 
@@ -26,6 +26,8 @@
 
 - **原生工具集**：`get_current_time`、`load_skill` / `read_skill_file`、`read_file` / `write_file`、`run_command`、`task`、`ask_user`。文件与 shell 工具锚在**会话工作空间**上（相对路径与 `run_command` 的缺省 cwd 都以此为基准）
 - **工程护栏**：命令超时默认 30s（上限 600s）、stdout/stderr 各留末尾 16k 字符、二进制与 >2MB 文件拒绝、中止时杀掉整个进程组、工具执行永不抛错（失败返回给模型自纠）
+- **三档权限模式（审批）**：`ask` 面内全问 / `auto` 只放过证明得了只读的命令 / `full` 面内免审批（黑名单除外）。判定表在 `tools/permission.ts`、只读证明在 `tools/risk.ts`、等待在 `chat/approvals.ts`，执行由 `withApproval` 装饰 ToolRunner 拦住，主 / 子 Agent 走同一道闸门；黑白名单在设置页「权限」栏编辑
+- **文件写入边界（jail）**：选了工作空间的会话里，`write_file` **写不到该目录之外**（绝对路径、`~`、`..`、工作空间内指向外面的软链都会被拒），判定走 `fs.realpath` 而不是文本比较。设置页「沙箱」栏可关闭；`full` 档 + 空名单那条今天也拦不住的路径由它兜住
 - **工作空间**：每个会话绑定一个目录，底栏可随时选择或清除，最近使用可复用；侧栏会话列表按工作空间分组，未选择工作空间的那批单独成组
 - **Skills**：`SKILL.md` 目录扫描 + frontmatter 校验、渐进式加载（system 里只放目录，模型按需 `load_skill`）、`/` 手动触发、从 GitHub / URL / 本地安装，支持更新与卸载
 - **MCP**：stdio 与 Streamable HTTP 两种传输，配置经 zod 校验，远端工具实时合并进工具池并带连接状态推送
@@ -33,7 +35,10 @@
 
 ## 已知边界
 
-- 文件与 shell 工具**没有硬沙箱**：绝对路径与 `~` 开头的路径仍可越界读写执行（只在结果里追加一行越界说明），也**不弹执行前确认**
+- **写入边界只管「写」**：`write_file` 被收进工作空间，但 `read_file` 仍能读根外文件、`run_command` 完全不受路径约束（`cat ~/.ssh/id_rsa`、`rm -rf` 靠审批拦，不靠边界拦）。OS 级的受限执行（mac `sandbox-exec` / Linux `bwrap`）与读侧收敛还没做
+- **私密文件目前只有提示词层面的约束**：system prompt 第 7 条与 `read_file` / `write_file` / `run_command` 三份描述都写明不碰凭据类文件（私钥与 SSH 配置、云厂商凭据、钥匙串、`.env` 与各类令牌文件），并明写「不要改用 shell 绕开」。这是**措辞不是拦截**——模型可能不听，MCP 工具更不在覆盖范围内，真护栏仍是审批 + 阶段 3 的受限执行
+- **审批不是沙箱**：它决定「问不问」，一次误点允许，命令就带着用户的全部权限真跑出去了
+- **未选工作空间的会话没有边界**：那种会话今天每条越界写都会弹审批（刻意的保守方向），关掉「沙箱」开关同样回到这条路
 - MCP 工具的结果长度没有统一上限（内置工具各自有上限）
 - 采样参数（temperature / max_tokens / top_p）不可配；`githubToken` 只存在于类型定义与安装器里，设置页没有入口
 - 窗口重载会丢掉正在等待作答的提问，那一轮要直到点停止才收场
@@ -42,15 +47,16 @@
 
 ## Roadmap / TODO
 
-按优先级排列。P0 是**已经在出错的路径**（无审批的写文件与 shell），不是锦上添花。
+按优先级排列。P0 是**已经在出错的路径**（模型自行决定的写入与 shell），不是锦上添花——它已经兑现了一半，剩下的半截仍排在最前。
 
 ### P0 · 工具审批 + 硬沙箱
 
-现在模型可以直接写工作空间内的文件、执行命令，只有工程护栏拦着。
-
-- [ ] 工具危险等级标记（`dangerous`）+ 执行前确认弹窗
-- [ ] 审批白名单持久化（按工具 / 按参数匹配）
-- [ ] 硬沙箱：路径与 cwd 收进工作空间，越界需要显式授权（`workspace` 这一列和 `paths.anchor` 已经是地基）
+- [x] 三档权限模式（`ask` / `auto` / `full`）+ 执行前审批卡片 + 黑白名单（面内为 `run_command` 全部、越出工作空间的读写、MCP 工具）
+- [x] 文件写入边界：`tools/jail.ts` 用 `fs.realpath` 把 `write_file` 收进工作空间，软链与 `..` 都算过真身；根不可用时 fail-closed
+- [ ] `run_command` 的受限执行：macOS `sandbox-exec` / Linux `bwrap` 包住子进程，Windows 平台无对应机制（要明写「本平台上 shell 仍不受限」）
+- [ ] 读侧收敛：`read_file` 与 shell 的读取要限制在由符号链接 / 硬链接 / `/dev` / `/proc` 构成的最小可执行系统内——只做路径检查注定漏，所以排在受限执行之后一起设计
+- [ ] `deny` 名单的路径粒度（现在只能按命令前缀 / 工具名匹配；写侧已由 jail 消解，读侧仍是缺口）
+- [ ] MCP stdio server 也走受限启动（它跨 run 存活、只能现读设置，与工具那一层的 run 快照是两条路，要分开建模）
 - [ ] 统一在 loop / runner 层的工具结果上限（含 MCP 工具）
 
 ### P1 · 对话基本盘
@@ -89,7 +95,7 @@
 
 - [ ] 暴露模型采样参数 temperature / max_tokens / top_p
 - [ ] 设置页补 `githubToken` 配置项
-- [ ] 评估 `sandbox: false` 的必要性，尽量收紧渲染层沙箱
+- [ ] 评估 `sandbox: false` 的必要性，尽量收紧**渲染进程沙箱**（Electron 的 `webPreferences.sandbox`，关的是界面能碰多少 Node；与上面 P0 的**工具执行沙箱**是两件事，后者关的是模型能写到哪儿）
 
 ### 工程基建（贯穿进行）
 
@@ -119,7 +125,7 @@ npm run dev
 ### Quality Gates
 
 ```bash
-npm test              # vitest：595 用例 / 34 文件（主进程纯逻辑 + Agent 行为 + SQL 与迁移 + 渲染层纯函数）
+npm test              # vitest：790 用例 / 45 文件（主进程纯逻辑 + Agent 行为 + SQL 与迁移 + 渲染层纯函数）
 npm run test:coverage # vitest + v8 覆盖率（范围见 vitest.config.ts）
 npm run typecheck     # 双 tsconfig：main/preload + renderer
 npm run lint          # ESLint 9 flat config（基线非零，改动不应新增 error）

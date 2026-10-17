@@ -54,6 +54,7 @@ import {
 import { createAskUserTool, type AskUserHandler } from '../agent/ask'
 import { createQuestionGate } from './questions'
 import { workspaceNote } from '../agent/prompt'
+import { jailFor } from '../sandbox'
 import {
   createTaskTool,
   TASK_TOOL_NAME,
@@ -178,6 +179,7 @@ function withGate(
   approval: ApprovalContext,
   scope: RunScope,
   workspace: string,
+  jail: { root: string } | undefined,
   emit: (event: ChatStreamEvent) => void,
   signal: AbortSignal
 ): ToolRunner {
@@ -185,6 +187,7 @@ function withGate(
     modeOf: (): PermissionMode => stricterMode(readPermissions().mode ?? 'ask', approval.startMode),
     lists: approval.lists,
     workspace,
+    jail,
     scope,
     signal,
     gate: approvalGate,
@@ -757,6 +760,7 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
       ctx.approval,
       scope,
       ctx.workspace,
+      call.jail,
       ctx.emit,
       ctx.signal
     )
@@ -775,7 +779,7 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
           role: 'system',
           content:
             role.systemPrompt +
-            workspaceNote(ctx.workspace) +
+            workspaceNote(ctx.workspace, call.jail !== undefined) +
             (canLoadSkills ? skillsCatalog() : '')
         },
         { role: 'user', content: req.prompt }
@@ -783,6 +787,9 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
       runner,
       // 与父级同一个目录:主 Agent 派任务时写的相对路径就是这个目录
       workspace: ctx.workspace,
+      // jail 从父级那次 task 调用的上下文里带过来(loop 已经在 ToolContext 上放了它):
+      // 只给主 run 装边界,子 run 就能在根外写文件,那道闸门等于没设
+      jail: call.jail,
       maxSteps: SUB_AGENT_MAX_STEPS,
       store: agentStore,
       emit: ctx.emit,
@@ -894,6 +901,16 @@ async function startRun(input: StartRunInput): Promise<void> {
   // 工作空间在 run 开始前读一次并随整轮带走:中途改设置不影响这一轮,
   // 而且相对路径的基准必须在整轮里稳定,否则上一条工具结果指的文件会换含义
   const workspace = getWorkspace(conversationId)
+  // 文件写入 jail 与 workspace 一起拍一次快照(照审批名单那条路,不是档位那种现读):
+  // 跑到一半切开关不影响这一轮,而父子 run 必须用同一个根。
+  // 建不出根来就整轮不开始 —— 静默退回"没有边界"继续跑,等于让用户以为护栏在。
+  let jail: { root: string } | undefined
+  try {
+    jail = jailFor(store.get('sandbox'), workspace)
+  } catch (error) {
+    emit({ type: 'error', scope, msg: error instanceof Error ? error.message : String(error) })
+    return
+  }
   // 工具快照在 run 开始时固定,保证本次 run 的执行范围与发给模型的列表严格一致
   const definitions = getAllTools()
   // 审批上下文与工具快照同一时刻建:MCP 工具的名字与「哪些算外部工具」必须是同一批
@@ -951,7 +968,10 @@ async function startRun(input: StartRunInput): Promise<void> {
   // id 与消息取自同一次转换:loop 中途压缩要把水位落在 id 上,两者必须一一对齐
   const items = toIdentifiedMessages(messages, tools)
   const current = getSummaryState(conversationId).summary
-  const history = [systemPromptMessage(workspace), ...historyBody(items, current)]
+  const history = [
+    systemPromptMessage(workspace, jail !== undefined),
+    ...historyBody(items, current)
+  ]
 
   await runAgent({
     scope,
@@ -961,8 +981,9 @@ async function startRun(input: StartRunInput): Promise<void> {
     signal,
     history,
     workspace,
+    jail,
     // 主 Agent 的每次工具调用都先过审批闸门(档位与名单见 tools/permission.ts)
-    runner: withGate(createToolRunner(tools), approval, scope, workspace, emit, signal),
+    runner: withGate(createToolRunner(tools), approval, scope, workspace, jail, emit, signal),
     maxSteps: MAIN_AGENT_MAX_STEPS,
     // 窗口跟着本次解析出的连接走:换服务商 / 换模型都自动跟着变,不再依赖一个全局值
     budget: budgetFor(contextWindow),

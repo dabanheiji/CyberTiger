@@ -41,6 +41,15 @@ export interface ApprovalQuery {
   args: Record<string, unknown>
   /** 本次 run 的工作空间,空串即未选择 */
   workspace: string
+  /**
+   * 文件写入 jail 的根;有根即 jail 开着。它在这里**只用来决定要不要问**,
+   * 真正的执行边界在 `tools/jail.ts` 与 `tools/files.ts` 那一侧 —— 这一层从不拦操作。
+   * 这里只当一个字符串用(**不做任何 IO**),所以这张判定表仍然能脱离应用跑单测;
+   * 越界与锚定也继续用纯文本的 `anchor`:jail 那边是另一套判定(realpath),
+   * 两套不互抄,于是有两种不对称都站在不打谎那侧 ——
+   * 字形界内而真身界外 → 不弹卡片、执行被拒;字形界外而真身界内 → 多问一次、执行成功。
+   */
+  jail?: { root: string }
   /** MCP 工具来自外部 server,行为不受本项目控制,所以整档纳入审批面 */
   isMcpTool: boolean
   lists: PermissionLists
@@ -132,7 +141,8 @@ interface Operation {
  *
  * 未选工作空间时(`anchor` 的 `outside` 恒为 false,没有基准目录就无从「越界」):
  * - `write_file` 一律要审批 —— 没有授权范围就等于没有授权。
- * - `read_file` 免审 —— 判不出越界,这是既有实现的留白,硬沙箱(P2)那一档补。
+ * - `read_file` 免审 —— 判不出越界,这是既有实现的留白;写侧的护栏已经由路径 jail
+ *   装上(见 `tools/jail.ts`),读侧还没接进去,仍是留白。
  * 方向不同只是因为「写会改本机状态、读不会」。
  */
 function describe(query: ApprovalQuery): Operation {
@@ -172,6 +182,10 @@ function describe(query: ApprovalQuery): Operation {
     const target = anchor(raw, workspace)
     const writing = toolName === WRITE_FILE
     const outside = writing && !hasWorkspace ? true : target.outside
+    // jail 开着时根外的写入会被工具当场拒掉(见 tools/jail.ts),审批不必再问一件注定失败的事。
+    // 只收写侧:读侧这一期没进 jail,根外的 read_file 照旧弹卡片。
+    // 没选工作空间就没有根,`writing && !hasWorkspace` 那条保守分支因此一字未动。
+    const refusedByJail = writing && query.jail !== undefined && target.outside
     return {
       summary: `${writing ? '写入' : '读取'}${outside ? '工作空间之外的' : ''}文件:${raw || '(空路径)'}`,
       detail: [
@@ -183,7 +197,7 @@ function describe(query: ApprovalQuery): Operation {
       risk: 'elevated',
       // 按目录放行而不是按单个文件:一个任务常要写同目录下好几个文件,按文件就得逐条问
       runAllowKey: `${toolName} ${path.dirname(target.path)}`,
-      inSurface: outside,
+      inSurface: outside && !refusedByJail,
       autoAllowed: false
     }
   }

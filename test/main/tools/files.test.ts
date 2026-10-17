@@ -223,6 +223,140 @@ describe('工作空间', () => {
   })
 })
 
+describe('写入 jail（一期只约束 write_file）', () => {
+  let ws = ''
+  let outside = ''
+
+  /**
+   * 两边都取 realpath:mac 的临时目录本身在 `/private/var` 下,拿字形当根会把界内路径判成界外
+   * —— 那正是 jail 里代价最高的一类错(判错方向是静默的)。
+   * 生产里这一步由 `main/sandbox.ts` 的 `jailFor` 负责。
+   */
+  beforeEach(() => {
+    ws = fs.realpathSync(makeTempDir())
+    outside = fs.realpathSync(makeTempDir())
+  })
+
+  afterEach(() => {
+    removeTempDir(ws)
+    removeTempDir(outside)
+  })
+
+  /** jail 开着:根就是工作空间(与 `jailFor` 给的同一份) */
+  function underJail(): { callId: string; workspace: string; jail: { root: string } } {
+    return { callId: 'call-jail', workspace: ws, jail: { root: ws } }
+  }
+
+  function writeInJail(args: Record<string, unknown>): Promise<ToolExecResult> {
+    return runner.execute('write_file', JSON.stringify(args), underJail())
+  }
+
+  it('根外的绝对路径被拒,且原文件的字节一个都没变', async () => {
+    const target = path.join(outside, 'keep.txt')
+    fs.writeFileSync(target, '原来的内容', 'utf8')
+
+    const res = await writeInJail({ path: target, content: '改掉它' })
+    expect(res.ok).toBe(false)
+    expect(res.result).toContain('本次写入未执行')
+    expect(res.result).toContain('之外')
+    // 拒了却还是「成功写入」是最坏的形态:界面显示完成、机器上的文件已换
+    expect(fs.readFileSync(target, 'utf8')).toBe('原来的内容')
+  })
+
+  it('根外的新文件也不会被建出来:拒绝发生在 mkdir 之前', async () => {
+    const res = await writeInJail({ path: path.join(outside, 'nested/new.md'), content: 'x' })
+    expect(res.ok).toBe(false)
+    expect(fs.existsSync(path.join(outside, 'nested'))).toBe(false)
+    expect(fs.existsSync(path.join(outside, 'nested/new.md'))).toBe(false)
+  })
+
+  it('../ 跳出根的相对路径同样被拒:模型更常写的是这种而不是绝对路径', async () => {
+    const res = await writeInJail({ path: '../escape.txt', content: 'x' })
+    expect(res.ok).toBe(false)
+    expect(res.result).toContain('本次写入未执行')
+    expect(fs.existsSync(path.join(ws, '..', 'escape.txt'))).toBe(false)
+  })
+
+  it('根内的深层新目录照旧能建:边界不能顺手把 mkdir 的递归能力废掉', async () => {
+    const res = await writeInJail({ path: 'a/b/c/d.md', content: '# 结论\n' })
+    expect(res.ok).toBe(true)
+    expect(fs.readFileSync(path.join(ws, 'a/b/c/d.md'), 'utf8')).toBe('# 结论\n')
+    // 界内不该有那句越界标注
+    expect(res.result).not.toContain('工作空间')
+  })
+
+  // win 上建软链要额外权限、libuv 也没有 O_NOFOLLOW,这两条只在 POSIX 侧跑
+  it.skipIf(process.platform === 'win32')(
+    '工作空间里一个指向外部目录的软链:写 link/id_rsa 被拒',
+    async () => {
+      fs.symlinkSync(outside, path.join(ws, 'link'))
+      const res = await writeInJail({ path: path.join(ws, 'link', 'id_rsa'), content: '公钥\n' })
+      expect(res.ok).toBe(false)
+      expect(res.result).toContain('本次写入未执行')
+      // 字形全程落在根内,只有解了真身才看得见它去了哪儿
+      expect(fs.existsSync(path.join(outside, 'id_rsa'))).toBe(false)
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    '最终组件是软链时不跟随:写入靠 O_NOFOLLOW 拒绝,而不是把内容送进链的另一头',
+    async () => {
+      const secret = path.join(outside, 'secret.txt')
+      fs.writeFileSync(secret, '不该被动', 'utf8')
+      fs.symlinkSync(secret, path.join(ws, 'link.txt'))
+
+      // 没开 jail 也要挡住:这条与 jail 无关,是 open 那一层的纪律
+      const res = await runner.execute(
+        'write_file',
+        JSON.stringify({ path: path.join(ws, 'link.txt'), content: '改掉' }),
+        { callId: 'call-nolink', workspace: ws }
+      )
+      expect(res.ok).toBe(false)
+      expect(res.result).toContain('软链')
+      expect(fs.readFileSync(secret, 'utf8')).toBe('不该被动')
+    }
+  )
+
+  it('追加不清空、覆盖不留旧尾巴:改成显式 flags 之后两种写法各钉一条', async () => {
+    const target = path.join(ws, 'log.txt')
+    fs.writeFileSync(target, '第一行\n', 'utf8')
+
+    const appended = await writeInJail({ path: target, content: '第二行\n', append: true })
+    expect(appended.ok).toBe(true)
+    expect(appended.result).toContain('已追加')
+    expect(fs.readFileSync(target, 'utf8')).toBe('第一行\n第二行\n')
+
+    const overwritten = await writeInJail({ path: target, content: '只剩这行' })
+    expect(overwritten.result).toContain('原有的')
+    expect(fs.readFileSync(target, 'utf8')).toBe('只剩这行')
+  })
+
+  it('没开 jail 时越界写仍然成功并带那句标注:默认行为一字不变', async () => {
+    const target = path.join(outside, 'a.txt')
+    const res = await runner.execute(
+      'write_file',
+      JSON.stringify({ path: target, content: '在外面\n' }),
+      { callId: 'call-plain', workspace: ws }
+    )
+    expect(res.ok).toBe(true)
+    expect(fs.readFileSync(target, 'utf8')).toBe('在外面\n')
+    expect(res.result).toContain('在本次会话的工作空间')
+    expect(res.result).toContain(ws)
+  })
+
+  it('jail 开着时根外的读仍然成功:一期只约束写,别悄悄把读也挡了', async () => {
+    fs.writeFileSync(path.join(outside, 'secret.txt'), '根外可读\n', 'utf8')
+    const res = await runner.execute(
+      'read_file',
+      JSON.stringify({ path: path.join(outside, 'secret.txt') }),
+      underJail()
+    )
+    expect(res.ok).toBe(true)
+    expect(res.result).toContain('根外可读')
+    expect(res.result).toContain('在本次会话的工作空间')
+  })
+})
+
 describe('大文件', () => {
   it('超过整体读取上限时拒绝,并提示改用 run_command 按行取片段', async () => {
     const target = file('huge.txt')

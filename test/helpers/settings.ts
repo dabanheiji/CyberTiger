@@ -14,6 +14,7 @@ export function resetSettings(): void {
   store.delete('enableSubAgent')
   store.delete('appearance')
   store.delete('permissions')
+  store.delete('sandbox')
   store.delete('windowState')
 }
 

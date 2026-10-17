@@ -33,6 +33,11 @@ export interface ApprovalDeps {
   lists: PermissionLists
   /** 本次 run 的工作空间,空串即未选择 */
   workspace: string
+  /**
+   * 文件写入 jail 的根,与 `workspace` 一样是 startRun 拍的一次快照(不是档位那种现读)。
+   * 有根就意味着根外的写入注定被工具拒绝 —— 审批让位,不弹一件注定失败的事。
+   */
+  jail?: { root: string }
   scope: RunScope
   signal: AbortSignal
   /** 全局审批通道:controller 收决定时按 id 找得到这里登记的等待 */
@@ -103,6 +108,7 @@ export function withApproval(runner: ToolRunner, deps: ApprovalDeps): ToolRunner
       toolName: name,
       args,
       workspace: deps.workspace,
+      jail: deps.jail,
       isMcpTool: mcpToolNames.has(name),
       lists: deps.lists,
       agent: scope.agent

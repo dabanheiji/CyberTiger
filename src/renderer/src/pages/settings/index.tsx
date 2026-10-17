@@ -2,10 +2,15 @@ import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button, Tabs, theme } from 'antd'
 import { ArrowLeftOutlined } from '@ant-design/icons'
-import type { AppearanceSettings, PermissionSettings } from '../../../../main/store/types'
+import type {
+  AppearanceSettings,
+  PermissionSettings,
+  SandboxSettings
+} from '../../../../main/store/types'
 import ProvidersPanel from './ProvidersPanel'
 import AppearancePanel from './AppearancePanel'
 import PermissionPanel from './PermissionPanel'
+import SandboxPanel from './SandboxPanel'
 import McpConfigEditor from './McpConfigEditor'
 import SkillsPanel from './SkillsPanel'
 import AgentsPanel from './AgentsPanel'
@@ -15,10 +20,12 @@ interface SettingsPageProps {
   onAppearanceChange: (next: AppearanceSettings) => void
   permissions: PermissionSettings
   onPermissionsChange: (next: PermissionSettings) => void
+  sandbox: SandboxSettings
+  onSandboxChange: (next: SandboxSettings) => void
 }
 
 /** 全部 tab 的 key:`?tab=xxx` 深链只认这些值,认不出的一律退回默认那档 */
-const TAB_KEYS = ['model', 'appearance', 'permission', 'mcp', 'skills', 'agents']
+const TAB_KEYS = ['model', 'appearance', 'permission', 'sandbox', 'mcp', 'skills', 'agents']
 
 /**
  * 初始停在哪个 tab。
@@ -39,7 +46,9 @@ function SettingsPage({
   appearance,
   onAppearanceChange,
   permissions,
-  onPermissionsChange
+  onPermissionsChange,
+  sandbox,
+  onSandboxChange
 }: SettingsPageProps): React.JSX.Element {
   const navigate = useNavigate()
   const { search } = useLocation()
@@ -84,6 +93,11 @@ function SettingsPage({
                 children: (
                   <PermissionPanel permissions={permissions} onChange={onPermissionsChange} />
                 )
+              },
+              {
+                key: 'sandbox',
+                label: '沙箱',
+                children: <SandboxPanel sandbox={sandbox} onChange={onSandboxChange} />
               },
               { key: 'mcp', label: 'MCP 服务', children: <McpConfigEditor /> },
               { key: 'skills', label: 'Skills', children: <SkillsPanel /> },

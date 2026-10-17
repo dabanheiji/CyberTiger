@@ -4,7 +4,11 @@ import { App as AntdApp } from 'antd'
 import { XProvider } from '@ant-design/x'
 import antdZhCN from 'antd/locale/zh_CN'
 import xZhCN from '@ant-design/x/locale/zh_CN'
-import type { AppearanceSettings, PermissionSettings } from '../../main/store/types'
+import type {
+  AppearanceSettings,
+  PermissionSettings,
+  SandboxSettings
+} from '../../main/store/types'
 import { useSystemTheme } from './hooks/useSystemTheme'
 import { buildTheme, defaultAccent, focusRing, selectionTint } from './theme'
 import ChatPage from './pages/chat'
@@ -14,15 +18,19 @@ import SettingsPage from './pages/settings'
  * 聊天页始终挂载:它持有会话、流式状态和发送标志,卸载会丢失进行中的回复。
  * 进入设置页时只是把聊天页隐藏。
  *
- * 外观与权限设置只在这条链上传递(App → 聊天页 / 设置页 → 面板):`settings:*` 本来就是
+ * 外观、权限与沙箱设置只在这条链上传递(App → 聊天页 / 设置页 → 面板):`settings:*` 本来就是
  * pull-only、没有 change 事件,所以「谁是当前值」必须只有一处。权限这一档尤其明显 ——
  * 底栏那颗选择器和设置页的名单编辑写的是同一个键,两处各自读 store 就会出现界面互相打架。
+ * 沙箱只由设置页那一个面板写,但它和另两键走同一次挂载读取,免得出现「设置页打开了、
+ * jail 的当前开关还停在空值」那种半屏旧状态。
  */
 function Routes(props: {
   appearance: AppearanceSettings
   onAppearanceChange: (next: AppearanceSettings) => void
   permissions: PermissionSettings
   onPermissionsChange: (next: PermissionSettings) => void
+  sandbox: SandboxSettings
+  onSandboxChange: (next: SandboxSettings) => void
 }): React.JSX.Element {
   const { pathname } = useLocation()
   const onSettings = pathname === '/settings'
@@ -40,17 +48,22 @@ function App(): React.JSX.Element {
   const isDark = useSystemTheme()
   const [appearance, setAppearance] = useState<AppearanceSettings>({})
   const [permissions, setPermissions] = useState<PermissionSettings>({})
+  // 空对象即「没设置过」,而 jail 的缺省语义是**开** —— 判断在主进程那侧
+  // (`sandbox.ts` 只认 `enabled === false`),这里照空值传下去不会把边界关掉
+  const [sandbox, setSandbox] = useState<SandboxSettings>({})
 
   // 只在挂载时读一次:明暗模式由主进程落到 nativeTheme,渲染层跟着 media query 走,
-  // 这里要的只是用户自定义的强调色;权限同理 —— 档位与名单只由写入方更新,不需要轮询
+  // 这里要的只是用户自定义的强调色;权限与沙箱同理 —— 只由写入方更新,不需要轮询
   useEffect(() => {
     void (async (): Promise<void> => {
-      const [nextAppearance, nextPermissions] = await Promise.all([
+      const [nextAppearance, nextPermissions, nextSandbox] = await Promise.all([
         window.api.settings.get('appearance'),
-        window.api.settings.get('permissions')
+        window.api.settings.get('permissions'),
+        window.api.settings.get('sandbox')
       ])
       setAppearance(nextAppearance ?? {})
       setPermissions(nextPermissions ?? {})
+      setSandbox(nextSandbox ?? {})
     })()
   }, [])
 
@@ -76,6 +89,8 @@ function App(): React.JSX.Element {
             onAppearanceChange={setAppearance}
             permissions={permissions}
             onPermissionsChange={setPermissions}
+            sandbox={sandbox}
+            onSandboxChange={setSandbox}
           />
         </HashRouter>
       </AntdApp>

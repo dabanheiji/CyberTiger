@@ -33,9 +33,11 @@ export default defineConfig({
         'src/main/database/{migrate,sql}.ts',
         'src/main/store/modelRef.ts',
         'src/main/appearance.ts',
+        'src/main/sandbox.ts',
         'src/main/agent/**',
         'src/main/chat/questions.ts',
         'src/main/tools/registry.ts',
+        'src/main/tools/jail.ts',
         'src/renderer/src/lib/**'
       ],
       reporter: ['text', 'html']

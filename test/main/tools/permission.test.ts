@@ -71,10 +71,70 @@ describe('档位表:文件读写', () => {
     ).toBe(false)
   })
 
-  it('未选工作空间时读文件免审(已知留白):anchor 判不出越界,硬沙箱那一档补', () => {
+  it('未选工作空间时读文件免审(已知留白):anchor 判不出越界,而这一期的写入边界只管写', () => {
     expect(asks({ workspace: '', toolName: 'read_file', args: { path: '/etc/passwd' } })).toBe(
       false
     )
+  })
+})
+
+describe('jail 开着时,审批为写入边界让位', () => {
+  const JAIL = { root: WS }
+
+  it('根外的 write_file 不再要审批:卡片不该承诺一件注定失败的事', () => {
+    for (const mode of ['ask', 'auto'] as PermissionMode[]) {
+      expect(
+        asks({
+          mode,
+          jail: JAIL,
+          toolName: 'write_file',
+          args: { path: path.join(path.sep, 'tmp', 'out.txt'), content: 'x' }
+        })
+      ).toBe(false)
+    }
+  })
+
+  it('让位只发生在越界那一边:根内的写入结论与 jail 无关', () => {
+    expect(asks({ jail: JAIL, toolName: 'write_file', args: { path: 'a.ts', content: 'x' } })).toBe(
+      false
+    )
+  })
+
+  it('读侧一条都不改:这一期 jail 只收写,根外的 read_file 照旧弹卡片', () => {
+    for (const mode of ['ask', 'auto'] as PermissionMode[]) {
+      expect(asks({ mode, jail: JAIL, toolName: 'read_file', args: { path: '/etc/hosts' } })).toBe(
+        true
+      )
+    }
+    expect(
+      asks({ mode: 'full', jail: JAIL, toolName: 'read_file', args: { path: '/etc/hosts' } })
+    ).toBe(false)
+  })
+
+  it('run_command 也不改:受限执行还在下一期,工作目录越界照样要问', () => {
+    expect(asks({ mode: 'ask', jail: JAIL, args: { command: 'ls', cwd: '/tmp' } })).toBe(true)
+    expect(asks({ mode: 'auto', jail: JAIL, args: { command: 'ls', cwd: '/tmp' } })).toBe(true)
+  })
+
+  it('没给根时判定与今天完全一致,连载荷都不变:关掉开关要回到逐条问,而不是两边都不管', () => {
+    const without = needsApproval(
+      query({ toolName: 'write_file', args: { path: '/tmp/out.txt', content: 'x' } })
+    )
+    expect(without).not.toBeNull()
+    expect(without?.summary).toContain('写入工作空间之外的文件')
+    expect(without?.detail.join('\n')).toContain('该路径在本次会话的工作空间之外')
+  })
+
+  it('黑名单仍然先问:它是唯一在任何档位都拦得住的闸门,不因 jail 而退场', () => {
+    const requirement = needsApproval(
+      query({
+        lists: { allow: [], deny: ['write_file'] },
+        jail: JAIL,
+        toolName: 'write_file',
+        args: { path: '/tmp/out.txt', content: 'x' }
+      })
+    )
+    expect(requirement?.risk).toBe('listed')
   })
 })
 
