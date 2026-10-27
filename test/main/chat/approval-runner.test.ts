@@ -108,6 +108,7 @@ function startRun(script: ModelStep[], options: HarnessOptions = {}): Harness {
     scope,
     baseUrl: 'https://model.test/v1',
     model: 'test-model',
+    providerId: 'provider-1',
     signal: controller.signal,
     history: [{ role: 'user', content: '看一下项目里的文件' }],
     runner,

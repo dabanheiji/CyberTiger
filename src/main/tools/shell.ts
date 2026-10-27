@@ -1,151 +1,24 @@
-import { spawn } from 'child_process'
-import type { ChildProcess } from 'child_process'
-import { annotate, anchor, describeFsError } from './paths'
-import type { ExecBoundary, ExecLaunch } from '../sandbox'
+import { annotate, anchor } from './paths'
+import { runProcess } from '../process/spawn'
+import type { OutputBill, ProcOutcome } from '../process/types'
+import type { ExecBoundary } from '../sandbox'
 import type { ToolDefinition } from './types'
 
-const DEFAULT_TIMEOUT_SECONDS = 30
+const DEFAULT_TIMEOUT_SECONDS = 60
 const MAX_TIMEOUT_SECONDS = 600
-
-/** stdout / stderr 各自的字符上限;超了保留末尾 —— 命令的报错通常最后才出现 */
-const MAX_OUTPUT_CHARS = 16_000
-
-/** SIGTERM 之后再多等这么久就 SIGKILL,拖着不退的进程不能占着整轮 */
-const KILL_GRACE_MS = 1_000
-
-/**
- * POSIX 下显式用 /bin/bash:模型写的命令常带 bash 写法,而 Linux 的 /bin/sh 往往是 dash,
- * 会莫名报语法错误。Windows 交给 Node 的默认 shell(cmd.exe)。
- */
-const SHELL: string | boolean = process.platform === 'win32' ? true : '/bin/bash'
-
-/** 受限执行那一支用的 shell:启动器后面要跟的是** argv**,不能再交给 Node 的 `shell` 选项拼串 */
-const POSIX_SHELL = '/bin/bash'
 
 /**
  * 边界造成的失败长什么样。
  *
  * 只匹配这几句:内核给的 EPERM/EROFS 与命令自己的故障在退出码上分不出来,而模型读到
  * 「No such file or directory」这类太常见的报错会跟着往错误的方向找原因,所以那句不进匹配。
+ *
+ * `Permission denied` 同样不进:它在正常开发里太常见(读一个没有权限的文件、写 root 拥有的目录),
+ * 而 mac 的沙箱拦下来的是 `Operation not permitted` —— 留着它等于把一大半普通失败
+ * 都贴上「可能是边界」的标签,那句话就没人信了。
  */
 const BOUNDARY_FAILURES =
-  /Operation not permitted|Permission denied|Read-only file system|Network is unreachable|Temporary failure in name resolution/
-
-interface StreamSink {
-  text: string
-  omittedChars: number
-}
-
-/** 边收边截断:只留末尾那么长,不指望进程自己先停下来 */
-function attachSink(stream: NodeJS.ReadableStream | null, sink: StreamSink): void {
-  if (!stream) return
-  stream.setEncoding('utf8')
-  stream.on('data', (chunk: string) => {
-    sink.text += chunk
-    if (sink.text.length > MAX_OUTPUT_CHARS) {
-      const excess = sink.text.length - MAX_OUTPUT_CHARS
-      sink.text = sink.text.slice(excess)
-      sink.omittedChars += excess
-    }
-  })
-}
-
-/**
- * 杀进程:POSIX 下按进程组杀,命令里再起的孙子进程(sleep、管道下游)才不会被留下。
- *
- * 套上启动器之后这一条**两个平台都原样成立**(实测):mac 的 `sandbox-exec` 是 `exec`,
- * 不换进程组,`$$` 就是 `child.pid`;Linux 的 bwrap 虽然 fork,但子进程与它同组,
- * 加上 `--die-with-parent` 与 `--unshare-pid` 后整棵树一起退。所以既不用改杀法,
- * 也不用把启动器的 pid 单独记一份。
- */
-function killTree(child: ChildProcess, mode: NodeJS.Signals): void {
-  try {
-    if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, mode)
-    else child.kill(mode)
-  } catch {
-    // 进程已经退了,没有要杀的
-  }
-}
-
-interface ShellRun {
-  exitCode: number | null
-  signalName: string
-  stdout: StreamSink
-  stderr: StreamSink
-  timedOut: boolean
-  aborted: boolean
-  spawnError: string
-}
-
-function runShell(
-  command: string,
-  cwd: string,
-  timeoutMs: number,
-  signal: AbortSignal | undefined,
-  launch?: ExecLaunch
-): Promise<ShellRun> {
-  return new Promise((resolve) => {
-    const run: ShellRun = {
-      exitCode: null,
-      signalName: '',
-      stdout: { text: '', omittedChars: 0 },
-      stderr: { text: '', omittedChars: 0 },
-      timedOut: false,
-      aborted: false,
-      spawnError: ''
-    }
-    // 受限与不受限是两条 spawn:不受限那一支连一个字节都不该变(它的 `shell: SHELL` 语义、
-    // 环境继承、cmd.exe 的行为都是既有单测钉住的),所以差别只写在这一份 spec 里。
-    // 启动器进 argv 而不是拼进命令串:审批的放行键算的是命令本身,拼串会把那道判定一起改掉。
-    const spec = launch
-      ? {
-          file: launch.file,
-          args: [...launch.args, POSIX_SHELL, '-c', command],
-          extra: { shell: false as const, env: launch.env }
-        }
-      : { file: command, args: [] as string[], extra: { shell: SHELL } }
-    // stdin 一律 ignore:命令里只要有读输入的动作(cat 不带参数、read、要确认的 rm -i),
-    // 管道会永远等不到内容,只能拖到超时才退
-    const child = spawn(spec.file, spec.args, {
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-      windowsHide: true,
-      ...spec.extra
-    })
-
-    let graceTimer: NodeJS.Timeout | undefined
-    const terminate = (reason: 'timedOut' | 'aborted'): void => {
-      run[reason] = true
-      killTree(child, 'SIGTERM')
-      graceTimer = setTimeout(() => killTree(child, 'SIGKILL'), KILL_GRACE_MS)
-    }
-    const timer = setTimeout(() => terminate('timedOut'), timeoutMs)
-    const onAbort = (): void => terminate('aborted')
-    signal?.addEventListener('abort', onAbort, { once: true })
-
-    const finish = (): void => {
-      clearTimeout(timer)
-      if (graceTimer) clearTimeout(graceTimer)
-      signal?.removeEventListener('abort', onAbort)
-      resolve(run)
-    }
-
-    // spawn 失败(如 cwd 不存在)只发 error、不会有 close,必须自己收尾
-    child.on('error', (error) => {
-      run.spawnError = describeFsError(error)
-      finish()
-    })
-    child.on('close', (code, codeSignal) => {
-      run.exitCode = code
-      run.signalName = codeSignal ?? ''
-      finish()
-    })
-
-    attachSink(child.stdout, run.stdout)
-    attachSink(child.stderr, run.stderr)
-  })
-}
+  /Operation not permitted|Read-only file system|Network is unreachable|Temporary failure in name resolution/
 
 /** 秒数夹在 1~600:省略用默认值,给了非法值就拒绝而不是悄悄回落 */
 function timeoutSecondsOf(value: unknown): number {
@@ -157,21 +30,37 @@ function timeoutSecondsOf(value: unknown): number {
   return Math.min(Math.max(seconds, 1), MAX_TIMEOUT_SECONDS)
 }
 
-function formatStream(label: string, sink: StreamSink): string {
-  if (!sink.text) return `${label}: (无输出)`
-  const mark = sink.omittedChars > 0 ? `[开头 ${sink.omittedChars} 字符已省略]\n` : ''
-  return `${label}:\n${mark}${sink.text.replace(/\n$/, '')}`
+function formatOutput(output: OutputBill): string {
+  const { head, tail, chars, lines, dropped } = output
+  if (chars === 0) return '输出: (无输出)'
+  const summary = `输出: 共 ${lines} 行 / ${chars} 字符`
+  const body =
+    dropped > 0
+      ? `${head}${head.endsWith('\n') ? '' : '\n'}[… 中间 ${dropped} 字符已省略 …]\n${tail}`
+      : `${head}${tail}`
+  return `${summary}\n\n---\n${body.replace(/\n$/, '')}`
+}
+
+function exitLine(run: ProcOutcome): string {
+  if (run.code !== null) return String(run.code)
+  // kind 是 exited 却有信号,只可能是别人杀的:我们自己在超时 / 中止时才发信号
+  const external = run.kind === 'exited' ? ',本次调用没有发出停止指令' : ''
+  return `无(进程被 ${run.signal || '信号'}终止${external})`
 }
 
 export const runCommandTool: ToolDefinition = {
   name: 'run_command',
   description:
-    '在本机执行一条 shell 命令,返回 exit_code、实际工作目录 cwd、stdout 与 stderr。' +
+    '在本机执行一条 shell 命令(前台执行,一次调用对应一件事),返回 exit_code、实际工作目录 cwd、耗时与输出。' +
     'POSIX 下由 /bin/bash -c 执行,Windows 下由 cmd.exe 执行。' +
     '工作目录由 cwd 参数决定:可以是绝对路径、以 ~ 开头的路径,或相对本次会话工作空间的路径;' +
     '省略则为该工作空间(未设置工作空间时是应用当前目录)。' +
-    '命令超过 timeout_seconds(默认 30 秒,最长 600 秒)或被中止时,进程连同它自己起的子进程一起被终止,' +
-    '已产出的输出仍会返回。stdout 与 stderr 各保留末尾 16000 字符,更早的部分会标明已省略。' +
+    '命令超过 timeout_seconds(默认 60 秒,最长 600 秒)或被中止时,进程连同它自己起的子进程一起被终止,' +
+    '已产出的输出仍会返回。' +
+    '这条调用结束时,命令留在后台的子进程也会被一并终止 —— 常驻服务不能靠一条普通命令留住,' +
+    '它在调用返回后不会继续运行;需要常驻的进程由 background_job 工具启动,它不受这条调用结束的影响。' +
+    'stdout 与 stderr 合并成一条输出、按发生顺序排列,stderr 的每一行带 [stderr] 前缀;' +
+    '输出最多保留 16000 字符(开头与结尾各留一部分,中间被省掉的部分会标明字符数)。' +
     '这条命令是否被关在受限执行环境里,取决于「沙箱」设置:在 macOS / Linux 上且那一档开着时,' +
     '命令由系统的受限执行机制包裹,它的文件写入出不了本次会话的工作空间与临时目录,' +
     '清单里点名的凭据目录也读不到;关掉、没选工作空间、或在 Windows 上时不受这道约束。' +
@@ -214,25 +103,31 @@ export const runCommandTool: ToolDefinition = {
     }
     const launch = exec?.state === 'confined' ? exec.launch : undefined
 
-    const run = await runShell(command, cwd, timeoutSeconds * 1000, context.signal, launch)
+    const run = await runProcess({
+      command,
+      cwd,
+      launch,
+      timeoutMs: timeoutSeconds * 1000,
+      signal: context.signal
+    })
     if (run.spawnError) throw new Error(`命令无法启动(cwd=${cwd}):${run.spawnError}`)
 
-    const exit =
-      run.exitCode === null ? `无(进程被 ${run.signalName || '信号'}终止)` : String(run.exitCode)
     const lines: string[] = []
-    if (run.timedOut) {
+    if (run.kind === 'timeout') {
       lines.push(`命令超过 ${timeoutSeconds} 秒未结束,已被终止。以下是终止前已产出的内容。`)
-    } else if (run.aborted) {
+    } else if (run.kind === 'aborted') {
       lines.push('本轮被用户中止,命令已被终止。以下是中止前已产出的内容。')
     }
     lines.push(
-      `exit_code: ${exit}`,
+      `exit_code: ${exitLine(run)}`,
       `cwd: ${cwd}`,
-      '',
-      formatStream('stdout', run.stdout),
-      '',
-      formatStream('stderr', run.stderr)
+      `耗时: ${((run.finishedAt - run.startedAt) / 1000).toFixed(1)}s`,
+      formatOutput(run.output)
     )
+    // 前台调用退出即清场:说清是我杀的,否则模型会把「服务没起来」归到它自己的命令上
+    if (run.kind === 'exited' && run.drained) {
+      lines.push('[注:命令退出后仍有子进程占用它的输出管道,这些进程已被一并终止]')
+    }
     if (exec?.state === 'confined') lines.push('', boundaryNote(exec, run))
     return annotate(lines.join('\n'), target, workspace)
   }
@@ -247,12 +142,15 @@ export const runCommandTool: ToolDefinition = {
  *
  * 两句都是陈述句,不含祈使(与 `confine`、`describeAnswer` 同一条纪律)。
  */
-function boundaryNote(exec: Extract<ExecBoundary, { state: 'confined' }>, run: ShellRun): string {
+function boundaryNote(
+  exec: Extract<ExecBoundary, { state: 'confined' }>,
+  run: ProcOutcome
+): string {
   const note =
     `[边界:本次命令在受限执行环境中运行——写入仅工作空间与临时目录,` +
     `清单内的凭据目录读不到,网络${exec.allowNetwork ? '放行' : '关闭'}]`
-  const failed = run.exitCode !== null && run.exitCode !== 0
-  const looksBlocked = BOUNDARY_FAILURES.test(`${run.stdout.text}\n${run.stderr.text}`)
+  const failed = run.code !== null && run.code !== 0
+  const looksBlocked = BOUNDARY_FAILURES.test(`${run.output.head}${run.output.tail}`)
   if (failed && looksBlocked) {
     return `${note}\n[注:上述非零退出可能来自这条边界,而不是命令自身的故障]`
   }

@@ -18,6 +18,12 @@ function run(args: Record<string, unknown>, context = ctx): Promise<ToolExecResu
   return runner.execute('run_command', JSON.stringify(args), context)
 }
 
+async function timed(task: Promise<ToolExecResult>): Promise<{ res: ToolExecResult; ms: number }> {
+  const start = Date.now()
+  const res = await task
+  return { res, ms: Date.now() - start }
+}
+
 let root = ''
 
 beforeEach(() => {
@@ -29,13 +35,14 @@ afterEach(() => {
 })
 
 describe('run_command 的结果', () => {
-  it('成功命令给出 exit_code、cwd 与 stdout', async () => {
+  it('成功命令给出 exit_code、cwd、耗时与输出', async () => {
     const res = await run({ command: nodeEval("console.log('hi')") })
     expect(res.ok).toBe(true)
     expect(res.result).toContain('exit_code: 0')
     expect(res.result).toContain(`cwd: ${process.cwd()}`)
-    expect(res.result).toContain('stdout:\nhi')
-    expect(res.result).toContain('stderr: (无输出)')
+    expect(res.result).toMatch(/耗时: \d+\.\ds/)
+    expect(res.result).toContain('输出: 共 1 行 / 3 字符')
+    expect(res.result).toContain('hi')
   })
 
   it('非零退出码不是工具失败:命令自己的错误对模型是有效信息', async () => {
@@ -44,12 +51,16 @@ describe('run_command 的结果', () => {
     expect(res.result).toContain('exit_code: 7')
   })
 
-  it('stderr 单独一段,模型能据此判断失败原因', async () => {
+  it('stderr 并进同一条输出并带前缀:分两段会丢掉「哪句错在哪句之后」', async () => {
     const res = await run({
-      command: nodeEval("console.error('boom');process.exit(2)")
+      command: nodeEval("console.log('out');console.error('boom');process.exit(2)")
     })
-    expect(res.result).toContain('stderr:\nboom')
+    expect(res.result).toContain('out')
+    expect(res.result).toContain('[stderr] boom')
     expect(res.result).toContain('exit_code: 2')
+    // 不再是两个独立小节
+    expect(res.result).not.toContain('stdout:')
+    expect(res.result).not.toContain('stderr:')
   })
 
   it('cwd 参数决定命令的工作目录', async () => {
@@ -64,6 +75,7 @@ describe('run_command 的结果', () => {
   it('不接参数的 cat 不会拖到超时:stdin 是关闭的,读输入的进程拿不到管道', async () => {
     const res = await run({ command: 'cat', timeout_seconds: 5 })
     expect(res.result).toContain('exit_code: 0')
+    expect(res.result).toContain('输出: (无输出)')
   })
 })
 
@@ -109,6 +121,43 @@ describe('run_command 的工作空间', () => {
   })
 })
 
+describe('run_command 的收尾不变量', () => {
+  it('命令退出后留下的后台子进程会被一起清掉:前台一条命令只对应一件事', async () => {
+    const { res, ms } = await timed(run({ command: 'sleep 5 & echo started', timeout_seconds: 10 }))
+    // 不能拖到超时:那意味着这条调用被一个不该留在前台的进程占着
+    expect(ms).toBeLessThan(4_000)
+    expect(res.result).toContain('started')
+    expect(res.result).toContain('已被一并终止')
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    '孙进程另起会话、逃出进程组攥着管道时也不卡死:观察窗过后主动收场',
+    async () => {
+      const code = [
+        "const { spawn } = require('node:child_process')",
+        // detached + inherit:既不在我们的进程组里,又把这条命令的 stdout 攥住;
+        // unref 让这一层立刻退出,否则 Node 会自己等着子进程、考不到收尾那一支
+        "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1200)'], { detached: true, stdio: 'inherit' }).unref()",
+        "console.log('spawned')"
+      ].join(';')
+      const { res, ms } = await timed(run({ command: nodeEval(code), timeout_seconds: 10 }))
+      expect(ms).toBeLessThan(4_000)
+      expect(res.result).toContain('spawned')
+      expect(res.result).toContain('已被一并终止')
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    '进程被外部杀掉时说清不是我们发的信号:否则会误报成超时或中止',
+    async () => {
+      const res = await run({ command: 'kill -9 $$', timeout_seconds: 10 })
+      expect(res.result).toContain('本次调用没有发出停止指令')
+      expect(res.result).not.toContain('未结束')
+      expect(res.result).not.toContain('用户中止')
+    }
+  )
+})
+
 describe('run_command 的边界保护', () => {
   it('超过 timeout_seconds 就终止进程,并仍把已产出的输出交回去', async () => {
     const res = await run({
@@ -129,10 +178,12 @@ describe('run_command 的边界保护', () => {
     expect((await pending).result).toContain('用户中止')
   })
 
-  it('输出只留末尾一段并标明省略了多少:一条命令刷几十万字符会挤掉整段对话', async () => {
+  it('输出保头保尾并标明中间省了多少:刷几十万字符会挤掉整段对话', async () => {
     const res = await run({ command: nodeEval("console.log('x'.repeat(40_000))") })
-    expect(res.result).toMatch(/开头 \d+ 字符已省略/)
+    expect(res.result).toMatch(/\[… 中间 \d+ 字符已省略 …\]/)
     expect(res.result.length).toBeLessThan(20_000)
+    // 开头那一段不能整块丢掉:模型要靠它知道这条命令到底输出了什么
+    expect(res.result).toContain('---\nxxxx')
   })
 
   it('工作目录不存在时报「命令无法启动」,不静默退回当前目录', async () => {

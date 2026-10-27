@@ -148,14 +148,21 @@ export function seatbeltProfile(input: ExecPolicyInput): string {
  * `maskDir` 是接线那层预创建的一个空目录(在 `tmpdir` 之下,因此两条边都在沙箱里可见)。
  * 选它而不是 `--tmpfs`:目录在不在都走同一条机制,不用加分支。
  */
-export function bwrapArgv(input: ExecPolicyInput, maskDir: string, pathValue: string): string[] {
-  const argv: string[] = [
-    '--die-with-parent',
-    '--new-session',
-    '--unshare-pid',
-    '--unshare-uts',
-    '--unshare-ipc'
-  ]
+export function bwrapArgv(
+  input: ExecPolicyInput,
+  maskDir: string,
+  pathValue: string,
+  options: { persist?: boolean } = {}
+): string[] {
+  const argv: string[] = []
+  // 常驻作业这两条都不能装:
+  //   - `--die-with-parent` 让载荷在 bwrap 一死就跟着死,而 stop 杀的正是 bwrap;
+  //   - `--new-session` 会把载荷放进它自己的会话(即自己的进程组),
+  //     于是 `kill(-bwrapPid)` 的组杀只收得到 bwrap,载荷活下来。
+  // 丢掉 `--new-session` 不削弱防护:bwrap 本身就是以 detached 起的,载荷这一侧
+  // 从来没有控制终端,TIOCSTI 那条攻击面在这里不存在。
+  if (!options.persist) argv.push('--die-with-parent', '--new-session')
+  argv.push('--unshare-pid', '--unshare-uts', '--unshare-ipc')
   if (!input.allowNetwork) argv.push('--unshare-net')
   argv.push('--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc')
   for (const dir of [input.workspace, input.tmpdir, ...input.writableExtra]) {

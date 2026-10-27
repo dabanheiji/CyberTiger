@@ -224,6 +224,18 @@ describe('execFor:三个状态各自什么时候出现', () => {
       expect(JSON.stringify(boundary.launch.args)).not.toContain('ls -la')
     }
   })
+
+  it('常驻作业的启动器:mac 与前台是同一份,bwrap 只少 die-with-parent 与 new-session', () => {
+    const mac = confined(execFor(undefined, { root: '/ws' }, SEATBELT))
+    // sandbox-exec 是 exec,不 fork、不换进程组,常驻那一份没有第二种写法
+    expect(mac.persistLaunch).toBe(mac.launch)
+    const linux = confined(execFor(undefined, { root: '/ws' }, BWRAP))
+    expect(linux.persistLaunch).toBeDefined()
+    expect(linux.launch.args).toContain('--die-with-parent')
+    expect(linux.persistLaunch?.args).not.toContain('--die-with-parent')
+    expect(linux.persistLaunch?.args).not.toContain('--new-session')
+    expect(linux.persistLaunch?.args[linux.persistLaunch.args.length - 1]).toBe('--')
+  })
 })
 
 describe('execFor:路径与环境都取真身', () => {

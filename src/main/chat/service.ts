@@ -32,6 +32,7 @@ import {
   runAgent,
   MAIN_AGENT_MAX_STEPS,
   type AgentStore,
+  type ModelStamp,
   type RunCompactResult,
   type RunCompactor
 } from '../agent/loop'
@@ -78,6 +79,8 @@ import {
 } from '../tools/registry'
 import { createApprovalGate } from './approvals'
 import { withApproval } from './approval'
+import { jobManager } from '../process/jobs'
+import { createBackgroundJobTool } from '../tools/jobs'
 import { stricterMode, type PermissionLists } from '../tools/permission'
 import type { PermissionMode, PermissionSettings } from '../store/types'
 
@@ -216,6 +219,8 @@ export function removeConversation(id: string): Database.RunResult {
   for (const run of activeRuns.values()) {
     if (run.conversationId === id) run.controller.abort()
   }
+  // 名下的常驻进程一起带走:会话没了,就没有任何界面还能 stop 它们
+  jobManager.dispose(id)
   return getDb().prepare(chatSql.conversations.remove).run(id)
 }
 
@@ -620,11 +625,20 @@ export function sendMessage(dto: sendMessageDto): string {
 
 /** Agent loop 使用的落库实现;退出中时静默跳过写操作 */
 const agentStore: AgentStore = {
-  addStep: (scope: RunScope) => {
+  addStep: (scope: RunScope, stamp: ModelStamp) => {
     const id = uuidv4()
     getDb()
       .prepare(chatSql.messages.addAssistantStep)
-      .run(id, scope.conversationId, scope.runId, scope.agent, scope.parentCallId, scope.depth)
+      .run(
+        id,
+        scope.conversationId,
+        scope.runId,
+        scope.agent,
+        scope.parentCallId,
+        scope.depth,
+        stamp.model,
+        stamp.providerId
+      )
     return id
   },
   updateStep: (messageId, content, reasoning, calls, usage) => {
@@ -773,6 +787,8 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
       baseUrl: connection.baseUrl,
       apiKey: connection.apiKey,
       model: connection.model,
+      // 角色可以指定别的服务商,所以这一步的归属跟着角色走,不跟父级走
+      providerId: targetProvider.id,
       // 复用父级 signal:用户停止或删除会话时父子一起停
       signal: ctx.signal,
       history: [
@@ -901,7 +917,7 @@ interface StartRunInput {
  * 而不是「这轮还带着全部历史、下轮才用上摘要」。
  */
 async function startRun(input: StartRunInput): Promise<void> {
-  const { conversationId, scope, connection, signal, emit, notify } = input
+  const { conversationId, scope, ref, connection, signal, emit, notify } = input
   const { baseUrl, apiKey, model, contextWindow } = connection
   // 工作空间在 run 开始前读一次并随整轮带走:中途改设置不影响这一轮,
   // 而且相对路径的基准必须在整轮里稳定,否则上一条工具结果指的文件会换含义
@@ -931,6 +947,10 @@ async function startRun(input: StartRunInput): Promise<void> {
   // 提问工具与 task 一样按 run 现构造(要闭包握住这次的 emit / scope / signal),因此不进
   // builtinTools:子 Agent 的工具池天然不含它,子 Agent 的上下文里本来也没有用户。
   tools.push(createAskUserTool(createAsker(scope, signal, emit)))
+  // 后台作业同样按 run 现构造(作业归会话所有,而 ToolContext 不带会话 id)。
+  // 放在 `definitions` 快照之后,所以子 Agent 的工具池里没有它 ——
+  // 子 Agent 留下的常驻进程没有人在界面上看得见。
+  tools.push(createBackgroundJobTool(jobManager, conversationId))
   // 允许派生子 Agent 时,给主 agent 挂上 task 工具(子 agent 自己拿不到它)
   if (store.get('enableSubAgent') !== false) {
     tools.push(
@@ -989,6 +1009,7 @@ async function startRun(input: StartRunInput): Promise<void> {
     baseUrl,
     apiKey,
     model,
+    providerId: ref.providerId,
     signal,
     history,
     workspace,

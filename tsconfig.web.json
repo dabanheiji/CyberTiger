@@ -8,6 +8,7 @@
     "src/preload/router/**/*",
     "src/main/chat/sql.ts",
     "src/main/chat/dto.ts",
+    "src/main/stats/dto.ts",
     "src/main/agent/context.ts",
     "src/main/mcp/types.ts",
     "src/main/skills/types.ts",

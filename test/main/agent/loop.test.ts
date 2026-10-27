@@ -40,6 +40,8 @@ interface RunOptions {
   compaction?: RunAgentParams['compaction']
   /** 会话的工作空间:必须原样送到每次工具调用的上下文里 */
   workspace?: string
+  /** 这次 run 跑在哪个服务商上;报表按它归集用量,空串即「未记录」 */
+  providerId?: string
 }
 
 interface RunOutcome {
@@ -57,6 +59,7 @@ async function run(options: RunOptions = {}): Promise<RunOutcome> {
     scope: options.scope ?? rootScope(),
     baseUrl: 'https://model.test/v1',
     model: 'test-model',
+    providerId: options.providerId ?? 'provider-1',
     signal: options.signal ?? new AbortController().signal,
     history: options.history ?? [{ role: 'user', content: '现在几点了' }],
     runner: makeRunner(options.tools ?? {}),
@@ -606,6 +609,47 @@ describe('用量计量', () => {
     expect(usageEvents.map((e) => ('context' in e ? e.context.droppedMessages : -1))).toEqual([
       0, 0, 2, 4
     ])
+  })
+})
+
+describe('模型归属', () => {
+  it('每条 assistant 步骤都插上这次 run 的服务商与模型:报表按模型归集用量靠它', async () => {
+    const probe = makeTool('结果')
+    const { store } = await run({
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'g1')] },
+        { toolCalls: [makeCall('probe', '{"i":2}', 'g2')] },
+        { content: '结束' }
+      ],
+      tools: { probe }
+    })
+    expect([...store.steps.values()].map((s) => s.stamp)).toEqual([
+      { providerId: 'provider-1', model: 'test-model' },
+      { providerId: 'provider-1', model: 'test-model' },
+      { providerId: 'provider-1', model: 'test-model' }
+    ])
+  })
+
+  it('归属写在插行的那一刻:步骤被中止打断、没写回用量也认得出是谁跑的', async () => {
+    const controller = new AbortController()
+    const probe = makeTool(() => {
+      controller.abort()
+      return '结果'
+    })
+    const { store } = await run({
+      signal: controller.signal,
+      script: [{ toolCalls: [makeCall('probe', '{}', 'k1')] }],
+      tools: { probe }
+    })
+    // updateStep 在中止时不一定跑到,所以只断言插行侧带上的那份归属
+    expect([...store.steps.values()].map((s) => s.stamp)).toEqual([
+      { providerId: 'provider-1', model: 'test-model' }
+    ])
+  })
+
+  it('调用方没给 providerId 时归属留空串而不是字段缺失:报表把这类行归进「未记录模型」', async () => {
+    const { store } = await run({ providerId: '', script: [{ content: '答完' }] })
+    expect([...store.steps.values()][0].stamp).toEqual({ providerId: '', model: 'test-model' })
   })
 })
 

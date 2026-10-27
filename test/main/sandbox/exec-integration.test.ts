@@ -192,7 +192,7 @@ describe.skipIf(!SEATBELT_READY)('受限执行的真实拦截(macOS Seatbelt)', 
   it('临时目录、PATH 与 /dev/null 都还在:边界只收写侧,不能把建临时目录与 `node -e` 一起打死', async () => {
     const node = await confined('node -e "console.log(1)"')
     expect(exitCodeOf(node)).toBe(0)
-    expect(node).toContain('stdout:\n1')
+    expect(node).toContain('---\n1')
 
     // 用 `-p "$TMPDIR"` 而不是裸 `mktemp -d`:后者在 mac 上会绕过 `TMPDIR` 去问系统要那一份
     // per-user 临时目录,而这份用例给边界的临时目录是它自己的那一条(生产里两者是同一条,
@@ -211,7 +211,7 @@ describe.skipIf(!SEATBELT_READY)('受限执行的真实拦截(macOS Seatbelt)', 
     const result = await confined('echo "[${SSH_AUTH_SOCK:-}]"')
     delete process.env.SSH_AUTH_SOCK
     expect(exitCodeOf(result)).toBe(0)
-    expect(result).toContain('stdout:\n[]')
+    expect(result).toContain('---\n[]')
 
     const home = await confined('echo "$HOME"')
     expect(home).toContain(fakeHome)

@@ -1,4 +1,4 @@
-import type { AgentStore } from '../../src/main/agent/loop'
+import type { AgentStore, ModelStamp } from '../../src/main/agent/loop'
 import type { ToolContext, ToolDefinition } from '../../src/main/tools/types'
 import { createToolRunner } from '../../src/main/tools/registry'
 import type { StreamChatParams, StreamChatResult } from '../../src/main/chat/llm'
@@ -24,6 +24,8 @@ export function subScope(parentCallId: string, agent = 'researcher'): RunScope {
 export interface StoredStep {
   id: string
   scope: RunScope
+  /** 这一步落库时盖上的模型归属;报表按它归集用量 */
+  stamp: ModelStamp
   content: string
   reasoning: string
   calls: ToolCallRecord[]
@@ -51,9 +53,9 @@ export function makeStore(): FakeStore {
     toolRows,
     removedIds,
     touched,
-    addStep: (scope: RunScope) => {
+    addStep: (scope: RunScope, stamp: ModelStamp) => {
       const id = `step-${++seq}`
-      steps.set(id, { id, scope, content: '', reasoning: '', calls: [] })
+      steps.set(id, { id, scope, stamp, content: '', reasoning: '', calls: [] })
       return id
     },
     updateStep: (messageId, content, reasoning, calls, usage) => {

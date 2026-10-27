@@ -12,6 +12,7 @@ import { migrateSettings } from './store/migrate'
 import { store } from './store'
 import { applyThemeSource } from './appearance'
 import { engineProbe } from './sandbox/preflight'
+import { jobManager } from './process/jobs'
 import { loadWindowState, trackWindowState } from './window-state'
 
 /**
@@ -129,6 +130,10 @@ app.whenReady().then(() => {
   initSkills()
   initAgents()
 
+  // 清扫上一次会话留下的后台作业:只杀「记录还在、进程还活着、启动时刻对得上」的那几条,
+  // 对不上的只清记录不动进程(宁留孤儿,不误杀)。
+  jobManager.sweep()
+
   createWindow()
 
   // 预热受限执行的引擎探针:那是一次 100–500ms 的 spawn,不该出现在「按下发送」的路径上。
@@ -142,10 +147,23 @@ app.whenReady().then(() => {
   })
 })
 
-// 退出前中止所有进行中的模型请求,避免数据库关闭后仍在写入;并关闭 MCP 子进程
-app.on('before-quit', () => {
-  abortAll()
-  void mcpManager.closeAll()
+/**
+ * 退出前中止所有进行中的模型请求,避免数据库关闭后仍在写入;关闭 MCP 子进程;
+ * 并把名下的后台作业一起收掉(有 3 秒总预算,杀不掉的进程不会拖住退出)。
+ *
+ * 这几件事都是异步的,而 `before-quit` 默认不会等 Promise —— 所以先 `preventDefault`,
+ * 做完再 `quit()` 一次。`quitting` 那个守卫让第二次进来时不再拦。
+ */
+let quitting = false
+app.on('before-quit', (event) => {
+  if (quitting) return
+  quitting = true
+  event.preventDefault()
+  void (async () => {
+    abortAll()
+    await Promise.all([jobManager.stopAll(), mcpManager.closeAll()])
+    app.quit()
+  })()
 })
 
 // Quit when all windows are closed, except on macOS. There, it's common

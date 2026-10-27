@@ -57,6 +57,10 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
     navigate('/settings')
   }, [navigate])
 
+  const openReport = useCallback((): void => {
+    navigate('/report')
+  }, [navigate])
+
   /**
    * 审批卡片上那个「加入白名单」:直接落到设置页的「权限」那一栏。
    * 只跳转不就地写名单 —— 名单有一处编辑面就够,两处会互相盖。
@@ -457,6 +461,7 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
         onRename={handleRename}
         onDelete={handleDelete}
         onOpenSettings={openSettings}
+        onOpenReport={openReport}
       />
       <ChatPanel
         messages={messages}

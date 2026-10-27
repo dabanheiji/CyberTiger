@@ -253,6 +253,20 @@ describe('bwrap 的参数', () => {
     expect(argv[argv.indexOf('TMPDIR') + 1]).toBe(input_.tmpdir)
     expect(seatbeltProfile(input_)).toContain(`(subpath ${seatbeltString(input_.tmpdir)})`)
   })
+
+  it('常驻作业那一份不装 --die-with-parent 与 --new-session:前者让载荷随 bwrap 死,后者会把载荷换进另一个进程组、一次组杀就收不到它', () => {
+    const foreground = bwrapArgv(input(), '/mask', '/usr/bin')
+    const persist = bwrapArgv(input(), '/mask', '/usr/bin', { persist: true })
+    expect(foreground).toContain('--die-with-parent')
+    expect(foreground).toContain('--new-session')
+    expect(persist).not.toContain('--die-with-parent')
+    expect(persist).not.toContain('--new-session')
+    // 差别只有那两条旗标:命名空间、挂载、环境与 `--` 收尾一个都不少
+    expect(persist.slice(0, 3)).toEqual(['--unshare-pid', '--unshare-uts', '--unshare-ipc'])
+    expect(persist).toContain('--ro-bind')
+    expect(persist[persist.length - 1]).toBe('--')
+    expect(persist.slice(3)).toEqual(foreground.slice(5))
+  })
 })
 
 describe('读侧点名清单', () => {

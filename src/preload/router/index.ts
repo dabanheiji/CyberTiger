@@ -3,11 +3,13 @@ import chat from './chat'
 import mcp from './mcp'
 import skills from './skills'
 import agents from './agents'
+import stats from './stats'
 
 export default {
   settings,
   chat,
   mcp,
   skills,
-  agents
+  agents,
+  stats
 }

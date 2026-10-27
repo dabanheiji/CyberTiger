@@ -12,11 +12,13 @@ import type {
 import { useSystemTheme } from './hooks/useSystemTheme'
 import { buildTheme, defaultAccent, focusRing, selectionTint } from './theme'
 import ChatPage from './pages/chat'
+import ReportPage from './pages/report'
 import SettingsPage from './pages/settings'
 
 /**
  * 聊天页始终挂载:它持有会话、流式状态和发送标志,卸载会丢失进行中的回复。
- * 进入设置页时只是把聊天页隐藏。
+ * 进入设置页或报表页时只是把聊天页隐藏 —— 所以新增页面要走这同一个「非聊天页即隐藏」的判断,
+ * 而不是各页自己再条件渲染一次聊天页:漏掉一处,切过去就把正在流式回复的那轮抹掉了。
  *
  * 外观、权限与沙箱设置只在这条链上传递(App → 聊天页 / 设置页 → 面板):`settings:*` 本来就是
  * pull-only、没有 change 事件,所以「谁是当前值」必须只有一处。权限这一档尤其明显 ——
@@ -34,12 +36,14 @@ function Routes(props: {
 }): React.JSX.Element {
   const { pathname } = useLocation()
   const onSettings = pathname === '/settings'
+  const onReport = pathname === '/report'
   return (
     <>
-      <div style={{ height: '100%', display: onSettings ? 'none' : undefined }}>
+      <div style={{ height: '100%', display: onSettings || onReport ? 'none' : undefined }}>
         <ChatPage permissions={props.permissions} onPermissionsChange={props.onPermissionsChange} />
       </div>
       {onSettings && <SettingsPage {...props} />}
+      {onReport && <ReportPage />}
     </>
   )
 }

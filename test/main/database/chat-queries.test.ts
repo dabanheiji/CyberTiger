@@ -27,14 +27,16 @@ const scope = (overrides: Partial<RunScope> = {}): RunScope => ({
 })
 
 /** 按 chatSql 的写入语句落一行 assistant 步骤 */
-function addStep(id: string, s: RunScope): void {
+function addStep(id: string, s: RunScope, stamp = { model: '', providerId: '' }): void {
   db.prepare(chatSql.messages.addAssistantStep).run(
     id,
     s.conversationId,
     s.runId,
     s.agent,
     s.parentCallId,
-    s.depth
+    s.depth,
+    stamp.model,
+    stamp.providerId
   )
 }
 

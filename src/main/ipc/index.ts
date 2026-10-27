@@ -23,6 +23,7 @@ import {
 } from '../mcp/controller'
 import * as skills from '../skills/controller'
 import * as agents from '../agents/controller'
+import { report as statsReport } from '../stats/controller'
 
 export function registerIpc(): void {
   ipcMain.handle('settings:get', get)
@@ -69,4 +70,7 @@ export function registerIpc(): void {
   ipcMain.handle('agents:create', agents.create)
   ipcMain.handle('agents:update', agents.update)
   ipcMain.handle('agents:remove', agents.remove)
+
+  // 报表:一次区间的 token 用量统计,纯读
+  ipcMain.handle('stats:report', statsReport)
 }

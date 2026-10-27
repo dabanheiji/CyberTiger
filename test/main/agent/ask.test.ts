@@ -226,6 +226,7 @@ function startRun(
     scope: rootScope(),
     baseUrl: 'https://model.test/v1',
     model: 'test-model',
+    providerId: 'provider-1',
     signal,
     history: [{ role: 'user', content: '帮我决定存储方案' }],
     runner: createToolRunner([createAskUserTool(handler)]),

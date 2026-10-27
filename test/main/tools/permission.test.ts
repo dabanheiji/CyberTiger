@@ -292,6 +292,84 @@ describe('名单优先级:deny → allow → 档位表', () => {
   })
 })
 
+describe('档位表:后台作业', () => {
+  const job = (args: Record<string, unknown>, mode: PermissionMode = 'ask'): boolean =>
+    asks({ mode, toolName: 'background_job', args })
+
+  it('start 进审批面:它启动的进程活过整轮,量级与一条前台命令不同', () => {
+    expect(job({ action: 'start', command: 'npm run dev' })).toBe(true)
+    expect(job({ action: 'start', command: 'npm run dev' }, 'auto')).toBe(true)
+  })
+
+  it('缺省 action 按 start 算:与工具那一侧的归一必须是同一件事', () => {
+    expect(job({ command: 'npm run dev' })).toBe(true)
+  })
+
+  it('list / logs / stop 不碰机器:它们与面外的内置工具同一档', () => {
+    for (const action of ['list', 'logs', 'stop']) {
+      expect(job({ action })).toBe(false)
+      expect(job({ action }, 'auto')).toBe(false)
+    }
+  })
+
+  it('放行键带 job: 前缀:放过一条前台命令不等于放过同名后台作业', () => {
+    const requirement = needsApproval(
+      query({
+        toolName: 'background_job',
+        args: { action: 'start', command: 'npm run dev' }
+      })
+    )
+    expect(requirement?.runAllowKey).toBe(`job:npm run dev [cwd=${WS}]`)
+    expect(requirement?.detail.join('\n')).toContain('本轮结束后继续运行')
+  })
+
+  it('黑名单对后台 start 同样生效:同一条命令换个工具不该绕过那道闸门', () => {
+    const requirement = needsApproval(
+      query({
+        mode: 'full',
+        toolName: 'background_job',
+        lists: { allow: [], deny: ['rm'] },
+        args: { action: 'start', command: 'rm -rf build' }
+      })
+    )
+    expect(requirement?.risk).toBe('listed')
+  })
+
+  it('黑名单不会因为 list / logs / stop 没有命令就误伤', () => {
+    const requirement = needsApproval(
+      query({
+        mode: 'full',
+        toolName: 'background_job',
+        lists: { allow: [], deny: ['rm'] },
+        args: { action: 'list' }
+      })
+    )
+    expect(requirement).toBeNull()
+  })
+
+  it('白名单里的命令同样免掉后台启动', () => {
+    expect(
+      asks({
+        toolName: 'background_job',
+        lists: { allow: ['npm run dev'], deny: [] },
+        args: { action: 'start', command: 'npm run dev' }
+      })
+    ).toBe(false)
+  })
+
+  it('后台启动也要过「工作目录出了授权范围」那一条', () => {
+    const requirement = needsApproval(
+      query({
+        mode: 'auto',
+        toolName: 'background_job',
+        args: { action: 'start', command: 'ls', cwd: '/tmp' }
+      })
+    )
+    expect(requirement).not.toBeNull()
+    expect(requirement?.detail.join('\n')).toContain('本次会话的工作空间之外')
+  })
+})
+
 describe('给用户的文案只用陈述句', () => {
   it('summary 与 detail 不出现「请 / 务必 / 记得」:这些内容也可能被复制进对话', () => {
     const cases: Partial<ApprovalQuery>[] = [

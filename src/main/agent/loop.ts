@@ -108,10 +108,25 @@ function goalAnchor(request: string): ChatCompletionMessage {
   }
 }
 
+/**
+ * 这一步跑在哪个模型上。
+ *
+ * 报表要按模型归集用量,而模型名与服务商只有在跑的时候才知道,事后补不出来;
+ * 子 Agent 用的是自己那个角色配的模型,所以这份归属属于步骤,不属于会话。
+ */
+export interface ModelStamp {
+  providerId: string
+  model: string
+}
+
 /** Agent loop 需要的落库操作,由 service 层注入,便于隔离数据库依赖 */
 export interface AgentStore {
-  /** 插入空 assistant 占位行,返回 id */
-  addStep: (scope: RunScope) => string
+  /**
+   * 插入空 assistant 占位行,返回 id。
+   * 模型归属在插行时就写定,而不是等 updateStep:中止的那一步可能根本不写回,
+   * 而「这一轮跑在哪个模型上」在那一刻就已经是事实。
+   */
+  addStep: (scope: RunScope, stamp: ModelStamp) => string
   /** 一步结束后写回;三者全空时应删除该行 */
   updateStep: (
     messageId: string,
@@ -172,6 +187,11 @@ export interface RunAgentParams {
   baseUrl: string
   apiKey?: string
   model: string
+  /**
+   * 本次 run 用的服务商 id;只用于落库时给每一步盖上模型归属。
+   * 空串表示来路不明(理论上不该出现),报表会把那些步骤归进「未记录模型」。
+   */
+  providerId: string
   signal: AbortSignal
   /** 已构建好的请求消息(含 system prompt);子 agent 传的是自己的任务 + 专属提示词 */
   history: ChatCompletionMessage[]
@@ -241,6 +261,9 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
   const stream = params.stream ?? streamChatCompletion
   const isRoot = scope.depth === 0
   const budget = params.budget ?? budgetFor()
+  // 每一步落库时都盖上这份模型归属:子 Agent 用的是自己那个角色的模型,所以它跟着步骤走,
+  // 而不是跟着会话走 —— 一个会话里混着用过的模型,报表要能分别算出各自消耗
+  const stamp: ModelStamp = { providerId: params.providerId, model: params.model }
 
   // 复制一份,避免后续 push 污染调用方持有的数组
   const source = [...params.history]
@@ -291,7 +314,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
       })
       const estimatedPrompt = estimateRequestTokens(plan.messages, stepTools)
 
-      const messageId = store.addStep(scope)
+      const messageId = store.addStep(scope, stamp)
       emit({ type: 'step_start', scope, messageId })
 
       let content = ''

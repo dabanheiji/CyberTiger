@@ -21,6 +21,8 @@ export function makeMessage(overrides: Partial<Message> = {}): Message {
     prompt_tokens: 0,
     completion_tokens: 0,
     tokens_estimated: 0,
+    model: '',
+    provider_id: '',
     created_at: '2026-10-08 10:00:00',
     ...overrides
   }

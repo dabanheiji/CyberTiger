@@ -16,7 +16,7 @@ export const MAX_LIST_ENTRIES = 100
  * 只会让用户照着界面配出一个不生效的条目,那比没说明更糟。
  */
 export const LIST_ENTRY_SHAPES: string[] = [
-  '命令前缀:只对 run_command 生效,按 token 边界匹配,且整条命令每个分段都要命中,如 npm run build',
+  '命令前缀:对 run_command 与 background_job 的 start 生效,按 token 边界匹配,且整条命令每个分段都要命中,如 npm run build',
   '工具名:该工具整体免审或必审,如 write_file、github__create_issue',
   'server 前缀:以 __ 结尾,匹配该 MCP server 的全部工具,如 github__'
 ]

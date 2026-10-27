@@ -68,7 +68,9 @@ describe('补列迁移', () => {
       'depth',
       'prompt_tokens',
       'completion_tokens',
-      'tokens_estimated'
+      'tokens_estimated',
+      'model',
+      'provider_id'
     ])
   })
 
@@ -110,6 +112,10 @@ describe('补列迁移', () => {
     expect(row.tool_calls).toBe('[]')
     expect(row.skill).toBe('')
     expect(row.depth).toBe(0)
+    // 报表把这两列的空串读成「未记录模型」,所以旧行必须是空串而不是 null,
+    // 否则聚合层要多写一个 null 分支才能算账
+    expect(row.model).toBe('')
+    expect(row.provider_id).toBe('')
   })
 
   it('重复执行是安全的(已存在的列不再 ALTER)', () => {
@@ -169,6 +175,29 @@ describe('整表重建迁移', () => {
         )
         .run()
     ).not.toThrow()
+  })
+
+  it('补过模型归属两列后再重建:列与已写下的值都不丢(迁移是先补列再重建)', () => {
+    legacyDb()
+    const driver = asMigrationDb(db)
+    runColumnMigrations(driver)
+    db.prepare("INSERT INTO conversations (id, title) VALUES ('c1', '会话')").run()
+    db.prepare(
+      "INSERT INTO messages (id, conversation_id, role, content) VALUES ('m1','c1','user','你好')"
+    ).run()
+    db.prepare(
+      "UPDATE messages SET model = 'qwen3.5:4b', provider_id = 'p-1' WHERE id = 'm1'"
+    ).run()
+
+    runTableRebuilds(driver)
+
+    // rebuildSql 用的是显式列清单,少写一列就等于把刚补上的那列连同数据一起丢掉
+    expect(columnNames(db, 'messages')).toContain('model')
+    expect(columnNames(db, 'messages')).toContain('provider_id')
+    expect(db.prepare('SELECT model, provider_id FROM messages').get()).toEqual({
+      model: 'qwen3.5:4b',
+      provider_id: 'p-1'
+    })
   })
 
   it('重建跑第二遍时判定为不需要,建表 SQL 不变', () => {

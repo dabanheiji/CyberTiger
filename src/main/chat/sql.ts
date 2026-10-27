@@ -41,6 +41,10 @@ export interface MessageRow {
   completion_tokens: number
   /** 1 = 端点没报 usage,上面两个数是本地估算值 */
   tokens_estimated: number
+  /** 产生该行的模型名;空串表示这一行写下时还没记录模型归属(加这两列之前的历史数据) */
+  model: string
+  /** 该模型所属服务商的 id;服务商被删掉之后仍然留着 id,报表据此退回显示 id */
+  provider_id: string
   created_at: string
 }
 
@@ -93,9 +97,13 @@ export const chatSql = {
     listTopLevelAfter:
       "SELECT * FROM messages WHERE conversation_id = ? AND parent_call_id = '' AND rowid > COALESCE((SELECT rowid FROM messages WHERE id = ?), -1) ORDER BY created_at ASC, rowid ASC",
     add: 'INSERT INTO messages (id, conversation_id, role, content, skill) VALUES (?, ?, ?, ?, ?)',
-    /** Agent 的一步:空 assistant 行占位 */
+    /**
+     * Agent 的一步:空 assistant 行占位。
+     * 模型归属在这里写而不是等 updateStep:一步可能因为中止而删行或不写回,
+     * 但报表要的是「这一轮跑在哪个模型上」,插行的那一刻就已经确定了。
+     */
     addAssistantStep:
-      "INSERT INTO messages (id, conversation_id, role, content, run_id, agent, parent_call_id, depth) VALUES (?, ?, 'assistant', '', ?, ?, ?, ?)",
+      "INSERT INTO messages (id, conversation_id, role, content, run_id, agent, parent_call_id, depth, model, provider_id) VALUES (?, ?, 'assistant', '', ?, ?, ?, ?, ?, ?)",
     /** 一步结束后写回正文、思考、工具调用与本步用量 */
     updateStep:
       'UPDATE messages SET content = ?, reasoning = ?, tool_calls = ?, prompt_tokens = ?, completion_tokens = ?, tokens_estimated = ? WHERE id = ?',

@@ -63,9 +63,29 @@ export interface ApprovalQuery {
 const READ_FILE = 'read_file'
 const WRITE_FILE = 'write_file'
 const RUN_COMMAND = 'run_command'
+const BACKGROUND_JOB = 'background_job'
 
 function stringArg(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
+ * `background_job` 的 action,缺省视作 `start`。
+ *
+ * 必须与工具那一侧的归一一致:模型漏掉 action 时工具会真的去启动一条命令,
+ * 而审批这边要是读成「没有命令」,漏掉一次审批就等于后台多了一个没人批过的常驻进程。
+ */
+function jobAction(args: Record<string, unknown>): string {
+  return stringArg(args.action) || 'start'
+}
+
+/** 这次调用里真正会被执行的那条命令;不执行命令的工具给空串 */
+function commandOf(query: ApprovalQuery): string {
+  if (query.toolName === RUN_COMMAND) return stringArg(query.args.command)
+  if (query.toolName === BACKGROUND_JOB && jobAction(query.args) === 'start') {
+    return stringArg(query.args.command)
+  }
+  return ''
 }
 
 /** 名单条目里的 server 前缀写法:以 `__` 结尾,匹配该 MCP server 的全部工具 */
@@ -205,6 +225,41 @@ function describe(query: ApprovalQuery): Operation {
     }
   }
 
+  if (toolName === BACKGROUND_JOB) {
+    const action = jobAction(args)
+    // list / logs / stop 不碰机器(停止是对一个已经批过的作业收尾),与面外的内置工具同一档
+    if (action !== 'start') {
+      return {
+        summary: `查看后台作业:${action}`,
+        detail: fromSubAgent,
+        risk: 'low',
+        runAllowKey: `job:${action}`,
+        inSurface: false,
+        autoAllowed: true
+      }
+    }
+    const command = stringArg(args.command)
+    const target = anchor(stringArg(args.cwd), workspace)
+    const risk = classifyCommand(command)
+    const cwdOutside = hasWorkspace && target.outside
+    return {
+      summary: `在后台启动命令:${command || '(空命令)'}`,
+      detail: [
+        `工作目录:${target.path}`,
+        ...(cwdOutside ? ['该目录在本次会话的工作空间之外'] : []),
+        '这个进程在本轮结束后继续运行,直到被停止、随会话删除或随应用退出',
+        ...risk.reasons.map((reason) => `风险:${reason}`),
+        ...fromSubAgent
+      ],
+      risk: risk.level,
+      // `job:` 前缀把两类工具分开:放行过的 `npm run build` 不该顺手放行一条同名的后台作业
+      // (后者活过整轮,量级完全不同)
+      runAllowKey: `job:${commandAllowKey(command)} [cwd=${target.path}]`,
+      inSurface: true,
+      autoAllowed: risk.level === 'low' && !cwdOutside
+    }
+  }
+
   if (query.isMcpTool) {
     const server = toolName.split('__')[0]
     return {
@@ -239,12 +294,13 @@ function describe(query: ApprovalQuery): Operation {
  */
 export function needsApproval(query: ApprovalQuery): ApprovalRequirement | null {
   const { lists, mode } = query
-  const command = stringArg(query.args.command)
-
-  const segments = query.toolName === RUN_COMMAND ? commandSegments(command) : null
+  // 命令前缀那条规则对两个会执行命令的工具一视同仁(run_command 与 background_job 的 start):
+  // 黑名单放过了后台那一支,等于给同一条命令开了一扇后门。
+  const command = commandOf(query)
+  const segments = command ? commandSegments(command) : null
   const denyHit =
     lists.deny.some((entry) => matchesTool(entry, query.toolName)) ||
-    (query.toolName === RUN_COMMAND &&
+    (command !== '' &&
       (segments
         ? anySegmentMatches(lists.deny, segments)
         : lists.deny.some((entry) => matchesRaw(entry, command))))
@@ -260,7 +316,7 @@ export function needsApproval(query: ApprovalQuery): ApprovalRequirement | null 
 
   const allowHit =
     lists.allow.some((entry) => matchesTool(entry, query.toolName)) ||
-    (query.toolName === RUN_COMMAND && allSegmentsCovered(lists.allow, command))
+    (command !== '' && allSegmentsCovered(lists.allow, command))
   if (allowHit) return null
 
   if (mode === 'full') return null
@@ -291,7 +347,7 @@ export function stricterMode(a: PermissionMode, b: PermissionMode): PermissionMo
 
 /** 给设置页用的名单条目形状说明(唯一一份,界面照抄) */
 export const LIST_ENTRY_SHAPES: string[] = [
-  '命令前缀:只对 run_command 生效,按 token 边界匹配,且整条命令每个分段都要命中,如 npm run build',
+  '命令前缀:对 run_command 与 background_job 的 start 生效,按 token 边界匹配,且整条命令每个分段都要命中,如 npm run build',
   '工具名:该工具整体免审或必审,如 write_file、github__create_issue',
   'server 前缀:以 __ 结尾,匹配该 MCP server 的全部工具,如 github__'
 ]

@@ -3,6 +3,7 @@ import { Conversations } from '@ant-design/x'
 import type { ConversationsProps } from '@ant-design/x'
 import { Button, Input, Modal, Tooltip, theme } from 'antd'
 import {
+  BarChartOutlined,
   DeleteOutlined,
   EditOutlined,
   FolderOpenOutlined,
@@ -22,6 +23,7 @@ interface SidebarProps {
   onNewInWorkspace: (dir: string) => void
   onRename: (id: string, title: string) => void
   onDelete: (id: string) => void
+  onOpenReport: () => void
   onOpenSettings: () => void
 }
 
@@ -38,6 +40,7 @@ function Sidebar({
   onNewInWorkspace,
   onRename,
   onDelete,
+  onOpenReport,
   onOpenSettings
 }: SidebarProps): React.JSX.Element {
   const { token } = theme.useToken()
@@ -158,6 +161,14 @@ function Sidebar({
           borderTop: `1px solid ${token.colorBorderSecondary}`
         }}
       >
+        <Tooltip title="用量报表" placement="right">
+          <Button
+            type="text"
+            aria-label="用量报表"
+            icon={<BarChartOutlined />}
+            onClick={onOpenReport}
+          />
+        </Tooltip>
         <Tooltip title="设置" placement="right">
           <Button
             type="text"

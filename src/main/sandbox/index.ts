@@ -65,7 +65,18 @@ export interface ExecLaunch {
 export type ExecBoundary =
   | { state: 'off'; reason: ExecOffReason }
   | { state: 'unavailable'; reason: string }
-  | { state: 'confined'; engine: SandboxEngine; launch: ExecLaunch; allowNetwork: boolean }
+  | {
+      state: 'confined'
+      engine: SandboxEngine
+      launch: ExecLaunch
+      /**
+       * 常驻作业用的启动器;缺省即与 `launch` 相同。
+       * 只有 bwrap 这一支需要两份(build 时旗标不同),seatbelt 的 `sandbox-exec` 是 exec,
+       * 前台与常驻本来就是同一条。
+       */
+      persistLaunch?: ExecLaunch
+      allowNetwork: boolean
+    }
 
 /**
  * 清单里**磁盘上真有**的那几条,逐条解过真身。
@@ -121,11 +132,18 @@ export function execFor(
   }
   try {
     if (probe.engine === 'seatbelt') {
+      // sandbox-exec 是 `exec`,不 fork、不换进程组:前台与常驻用的是同一条启动方式
+      const launch = {
+        file: '/usr/bin/sandbox-exec',
+        args: ['-p', seatbeltProfile(input)],
+        env
+      }
       return {
         state: 'confined',
         engine: probe.engine,
         allowNetwork,
-        launch: { file: '/usr/bin/sandbox-exec', args: ['-p', seatbeltProfile(input)], env }
+        launch,
+        persistLaunch: launch
       }
     }
     // 掩蔽用的空目录:被点名的目录盖它,于是命令看到「存在但列不出内容」。
@@ -136,7 +154,13 @@ export function execFor(
       state: 'confined',
       engine: probe.engine,
       allowNetwork,
-      launch: { file: 'bwrap', args: bwrapArgv(input, maskDir, env.PATH), env }
+      launch: { file: 'bwrap', args: bwrapArgv(input, maskDir, env.PATH), env },
+      // 常驻那一份只是少了两个与「进程组 / 父进程死亡」有关的旗标,见 bwrapArgv
+      persistLaunch: {
+        file: 'bwrap',
+        args: bwrapArgv(input, maskDir, env.PATH, { persist: true }),
+        env
+      }
     }
   } catch (error) {
     // 清单冲突(把工作空间选成了 `~`,或选成了 `~/.ssh` 底下这类)是配置问题,不是引擎故障:
