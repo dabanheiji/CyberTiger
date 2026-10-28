@@ -56,6 +56,28 @@ export function isVolatileTool(name: string, definitions: ToolDefinition[]): boo
   return definitions.find((t) => t.name === name)?.volatile === true
 }
 
+/**
+ * 把一次调用的 JSON 参数解成对象,解不出来给 `undefined`。
+ *
+ * 审批闸门与钩子这两道装饰器都**不为一次解析不了的调用做判定**:那句「参数不是合法的 JSON」
+ * 由内层 runner 给更准(它手里才有真正的 schema)。空串算「没有参数」,那是合法形状。
+ * 导出而不是各写一份,是因为装饰器会一层套一层(`withHooks(withGate(...))`),
+ * 两层的「同一次调用是不是同一份参数」必须严格同值,否则边界判定与审批判定会读着两个对象。
+ */
+export function parseToolArgs(argumentsJson: string): Record<string, unknown> | undefined {
+  const trimmed = argumentsJson.trim()
+  if (!trimmed) return {}
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {
+    // 交给内层 runner 报错
+  }
+  return undefined
+}
+
 /** 转成 chat/completions 请求里的 tools 参数 */
 export function toChatCompletionTools(
   definitions: ToolDefinition[]

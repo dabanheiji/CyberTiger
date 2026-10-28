@@ -60,8 +60,14 @@ function toolKey(call: ToolCallRecord): string {
   return `${call.name}|${raw}`
 }
 
-/** 取本次 run 要回答的那条请求:历史里最后一条有内容的 user 消息 */
-function latestRequest(history: ChatCompletionMessage[]): string {
+/**
+ * 取本次 run 要回答的那条请求:历史里最后一条有内容的 user 消息。
+ *
+ * 导出不只是给 loop 自己用:钩子的 payload 每个事件都带这一句,而那份 payload 由
+ * `chat/service.ts` 在 run 开始前构造的编排层持有。两处必须是同一个函数,
+ * 否则钩子读到的「本轮要回应的话」与循环里目标锚定用的是那句话就成了两件事。
+ */
+export function latestRequest(history: ChatCompletionMessage[]): string {
   for (let i = history.length - 1; i >= 0; i--) {
     const message = history[i]
     if (message.role !== 'user') continue
@@ -394,7 +400,9 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
             callId: call.id,
             signal,
             workspace: params.workspace,
-            jail: params.jail
+            jail: params.jail,
+            // 只有钩子读它:拦下一次调用时要说清是第几步的那一次,而步号只有循环手里有
+            step
           }))
         if (!cached) toolCache.set(key, exec)
         const toolMessageId = store.addToolMessage(scope, call.id, exec.result)

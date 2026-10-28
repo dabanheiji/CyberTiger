@@ -31,6 +31,12 @@ export interface ToolContext {
    * 而这一处忘掉的后果是命令不受边界约束地跑起来。
    */
   jail?: { root: string; exec?: ExecBoundary }
+  /**
+   * 本次调用处在这一轮的第几步(从 1 起)。
+   * 工具本身不需要它 —— loop 是唯一知道步号的地方,所以省略是常态而不是异常;
+   * 钩子的 payload 与那份 JSONL 日志要它,为的是「哪一步的哪一次调用被拦下」能被回溯。
+   */
+  step?: number
 }
 
 /** 一个可供模型调用的本地工具 */

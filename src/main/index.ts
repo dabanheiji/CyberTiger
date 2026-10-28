@@ -8,6 +8,7 @@ import { initMcp } from './mcp/controller'
 import { mcpManager } from './mcp/manager'
 import { initSkills } from './skills/controller'
 import { initAgents } from './agents/controller'
+import { initHooks } from './hooks/controller'
 import { migrateSettings } from './store/migrate'
 import { store } from './store'
 import { applyThemeSource } from './appearance'
@@ -129,6 +130,8 @@ app.whenReady().then(() => {
   initMcp()
   initSkills()
   initAgents()
+  // 钩子目录:建目录 + 扫描 + 监听。首次启动时这条 mkdir 是它唯一一次写用户机器的文件系统
+  initHooks()
 
   // 清扫上一次会话留下的后台作业:只杀「记录还在、进程还活着、启动时刻对得上」的那几条,
   // 对不上的只清记录不动进程(宁留孤儿,不误杀)。

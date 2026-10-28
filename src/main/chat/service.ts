@@ -31,6 +31,7 @@ import type {
 import {
   runAgent,
   MAIN_AGENT_MAX_STEPS,
+  latestRequest,
   type AgentStore,
   type ModelStamp,
   type RunCompactResult,
@@ -79,6 +80,9 @@ import {
 } from '../tools/registry'
 import { createApprovalGate } from './approvals'
 import { withApproval } from './approval'
+import { withHooks } from './hook'
+import { createHookSet } from '../hooks/set'
+import { hookRegistry } from '../hooks/registry'
 import { jobManager } from '../process/jobs'
 import { createBackgroundJobTool } from '../tools/jobs'
 import { stricterMode, type PermissionLists } from '../tools/permission'
@@ -926,14 +930,16 @@ async function startRun(input: StartRunInput): Promise<void> {
   // 跑到一半切开关不影响这一轮,而父子 run 必须用同一个根。
   // 建不出根来就整轮不开始 —— 静默退回"没有边界"继续跑,等于让用户以为护栏在。
   let jail: ToolContext['jail']
+  // 沙箱设置只读一次:钩子那条边界判定(`boundaryOf`)要分清「用户关掉了沙箱」与
+  // 「这条会话没选工作空间」,而它读的必须是**造这份 jail 用的同一份**设置。
+  // 现读两次会出现「jail 是开着的时候算的、结论说它是关着的」这种读不出来源的日志
+  const sandboxSettings = store.get('sandbox')
   try {
-    const root = jailFor(store.get('sandbox'), workspace)
+    const root = jailFor(sandboxSettings, workspace)
     // 受限执行挂在同一个 jail 对象上,而不是新开一条线:子 run 复用父级那份 `call.jail`,
     // 于是「父子同一道边界」这条已有保证自动覆盖 exec;多一个字段就多一处忘的机会。
     // 探针在启动时已预热过,这里通常只是在读一份 memo 结论,不会把 spawn 挡在发消息前面。
-    jail = root
-      ? { ...root, exec: execFor(store.get('sandbox'), root, await engineProbe()) }
-      : undefined
+    jail = root ? { ...root, exec: execFor(sandboxSettings, root, await engineProbe()) } : undefined
   } catch (error) {
     emit({ type: 'error', scope, msg: error instanceof Error ? error.message : String(error) })
     return
@@ -1004,6 +1010,20 @@ async function startRun(input: StartRunInput): Promise<void> {
     ...historyBody(items, current)
   ]
 
+  // 钩子声明与工具快照、审批名单同一时刻拍一次:跑到一半改钩子设置不影响这一轮,
+  // 而已经触发的下一次要按哪份名单算必须有唯一答案(与 `mcpToolNames` 同一条纪律)。
+  // 编排层在这里建好、随整轮固定 —— 派发规则与说明缓冲区都归 `hooks/set.ts`,
+  // 这一层只负责把那次 run 的事实(范围、目录、边界、中止信号、本轮要回应的话)交给它。
+  const hooks = createHookSet(hookRegistry.getEnabled()).forRun({
+    scope,
+    workspace,
+    jail,
+    sandbox: sandboxSettings,
+    signal,
+    request: latestRequest(history),
+    maxSteps: MAIN_AGENT_MAX_STEPS
+  })
+
   await runAgent({
     scope,
     baseUrl,
@@ -1014,8 +1034,13 @@ async function startRun(input: StartRunInput): Promise<void> {
     history,
     workspace,
     jail,
-    // 主 Agent 的每次工具调用都先过审批闸门(档位与名单见 tools/permission.ts)
-    runner: withGate(createToolRunner(tools), approval, scope, workspace, jail, emit, signal),
+    // 主 Agent 的每次工具调用先过钩子、再进审批闸门(档位与名单见 tools/permission.ts)。
+    // 钩子在最外层:`withHooks` 拦下那次调用时不发 `tool_approval`,于是卡片永远不会
+    // 承诺一件已经被本机策略否掉的事(顺序理由见 chat/hook.ts 那段)
+    runner: withHooks(
+      withGate(createToolRunner(tools), approval, scope, workspace, jail, emit, signal),
+      hooks.toolDeps
+    ),
     maxSteps: MAIN_AGENT_MAX_STEPS,
     // 窗口跟着本次解析出的连接走:换服务商 / 换模型都自动跟着变,不再依赖一个全局值
     budget: budgetFor(contextWindow),

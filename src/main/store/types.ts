@@ -161,6 +161,14 @@ export interface AppSettings {
   /** 已禁用的自定义子 Agent 角色名 */
   disabledAgents?: string[]
   /**
+   * 已禁用的钩子名。
+   *
+   * 启停不进 `HOOK.md` 而放这里:磁盘上写下声明即「用户要它」,而关掉一条是应用侧的状态,
+   * 不该让用户去改自己写的文件。与 `disabledSkills` / `disabledAgents` 同一条纪律,
+   * 不进 `defaults`、不走迁移(缺键即「没有关掉任何一条」)。
+   */
+  disabledHooks?: string[]
+  /**
    * 新建会话默认使用的工作空间目录:草稿态(还没建会话)在选择器里挑的目录先落这里,
    * 首条消息建会话时由 service 抄进 conversations.workspace。已有会话一律读自己那一列。
    */

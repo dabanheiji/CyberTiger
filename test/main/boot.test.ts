@@ -1,4 +1,5 @@
 import { agentRegistry } from '../../src/main/agents/registry'
+import { hookRegistry } from '../../src/main/hooks/registry'
 import { getAllTools } from '../../src/main/tools/registry'
 import { mcpManager } from '../../src/main/mcp/manager'
 import { skillRegistry } from '../../src/main/skills/registry'
@@ -15,6 +16,8 @@ describe('Electron 替身', () => {
   it('主进程模块可在 Node 侧导入', () => {
     expect(typeof skillRegistry.scan).toBe('function')
     expect(typeof agentRegistry.scan).toBe('function')
+    // 只 import registry 而不 import hooks/controller:替身里没有 shell
+    expect(typeof hookRegistry.scan).toBe('function')
     expect(store.get('disabledSkills')).toBeUndefined()
   })
 

@@ -11,6 +11,7 @@ export function resetSettings(): void {
   store.delete('mcpServers')
   store.delete('disabledSkills')
   store.delete('disabledAgents')
+  store.delete('disabledHooks')
   store.delete('enableSubAgent')
   store.delete('appearance')
   store.delete('permissions')
@@ -24,5 +25,6 @@ export function setSettings(values: AppSettings): void {
   if (values.currentModel) store.set('currentModel', values.currentModel)
   if (values.disabledSkills) store.set('disabledSkills', values.disabledSkills)
   if (values.disabledAgents) store.set('disabledAgents', values.disabledAgents)
+  if (values.disabledHooks) store.set('disabledHooks', values.disabledHooks)
   if (values.enableSubAgent !== undefined) store.set('enableSubAgent', values.enableSubAgent)
 }

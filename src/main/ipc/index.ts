@@ -23,6 +23,7 @@ import {
 } from '../mcp/controller'
 import * as skills from '../skills/controller'
 import * as agents from '../agents/controller'
+import * as hooks from '../hooks/controller'
 import { report as statsReport } from '../stats/controller'
 
 export function registerIpc(): void {
@@ -70,6 +71,16 @@ export function registerIpc(): void {
   ipcMain.handle('agents:create', agents.create)
   ipcMain.handle('agents:update', agents.update)
   ipcMain.handle('agents:remove', agents.remove)
+
+  // 钩子:声明目录的读写 + 最近执行 + 两个「在系统里打开」
+  ipcMain.handle('hooks:list', hooks.list)
+  ipcMain.handle('hooks:setEnabled', hooks.setEnabled)
+  ipcMain.handle('hooks:create', hooks.create)
+  ipcMain.handle('hooks:update', hooks.update)
+  ipcMain.handle('hooks:remove', hooks.remove)
+  ipcMain.handle('hooks:recent', hooks.recent)
+  ipcMain.handle('hooks:openDir', hooks.openDir)
+  ipcMain.handle('hooks:openLog', hooks.openLog)
 
   // 报表:一次区间的 token 用量统计,纯读
   ipcMain.handle('stats:report', statsReport)

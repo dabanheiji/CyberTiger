@@ -16,6 +16,20 @@ export type ExitKind = 'exited' | 'timeout' | 'aborted' | 'spawn-error'
  */
 export type ProcIo = { kind: 'pipe' } | { kind: 'file'; fd: number }
 
+/**
+ * 输出收集器:两条流怎么合、留下多少由调用方决定。
+ *
+ * 省略即 `MergedSink`(合成一条、保头保尾)。钩子那条路径换成 `BufferSink`,要的正是
+ * 「原始 stdout,要么完整要么作废」:`[stderr] ` 前缀会污染 JSON,而 `OutputSink` 那种
+ * 从中间挖洞的裁剪会把一份 MB 级回执劈成解析不了的半截 —— 半截 JSON 不是「短一点的结论」,
+ * 是「没有结论」。
+ */
+export interface ProcSink {
+  pushStdout(text: string): void
+  pushStderr(text: string): void
+  bill(): OutputBill
+}
+
 export interface ProcSpec {
   /** 模型写下的那条命令;一个字都不改,审批的放行键算的就是它 */
   command: string
@@ -29,6 +43,25 @@ export interface ProcSpec {
   signal?: AbortSignal
   /** 附加的环境变量(后台作业的归属标记),与 launch.env 合并 */
   env?: NodeJS.ProcessEnv
+  /**
+   * 要写进子进程 stdin 的内容;省略即 stdin 关闭。
+   *
+   * 那根管**只在给了这一句时才开**:关闭的 stdin 会让读输入的命令立刻拿到 EOF,
+   * 而开着的管道一旦没人写,`cat` 不带参数、`read`、要确认的 `rm -i` 就永远等不到内容,
+   * 只能拖到超时。所以默认那条纪律(见 spawnProc 里的 stdio)照旧,这里只是唯一的例外。
+   */
+  stdin?: string
+  /**
+   * 命令本身,argv 形状(第 0 项是可执行文件)。
+   *
+   * 钩子用它:参数不进 shell,于是没有二次分词与引号陷阱,带空格的参数就是原样一项。
+   * 给了这一项就不再读 `command` 去拼载荷(那句只留给审批与日志看),
+   * 有 `launch` 时这串 argv 接在启动器后面 —— seatbelt 是 `-p <profile> <program> <args>`、
+   * bwrap 的参数以 `--` 收尾,两侧都是这个形状。
+   */
+  argv?: string[]
+  /** 省略即 `MergedSink` */
+  sink?: ProcSink
 }
 
 /** 输出账目:保头保尾,中间丢掉多少也记着 */

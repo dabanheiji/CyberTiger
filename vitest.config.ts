@@ -36,6 +36,7 @@ export default defineConfig({
         'src/main/sandbox/**',
         'src/main/agent/**',
         'src/main/chat/questions.ts',
+        'src/main/hooks/**',
         'src/main/tools/registry.ts',
         'src/main/tools/jail.ts',
         'src/renderer/src/lib/**'

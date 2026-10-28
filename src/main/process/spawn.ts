@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process'
 import { describeFsError } from '../tools/paths'
 import { killGroup, killTree } from './kill'
 import { MergedSink } from './sink'
-import type { ExitKind, ProcOutcome, ProcSpec } from './types'
+import type { ExitKind, ProcOutcome, ProcSink, ProcSpec } from './types'
 
 /** SIGTERM 之后再多等这么久就 SIGKILL:拖着不退的进程不能占着整轮 */
 export const KILL_GRACE_MS = 1_000
@@ -35,27 +35,43 @@ const POSIX_SHELL = '/bin/bash'
 
 export function spawnProc(spec: ProcSpec): ChildProcess {
   const io = spec.io ?? { kind: 'pipe' }
+  const argv = spec.argv && spec.argv.length > 0 ? spec.argv : undefined
   // 受限与不受限是两条 spawn:不受限那一支连一个字节都不该变(它的 `shell: SHELL` 语义、
   // 环境继承、cmd.exe 的行为都是既有单测钉住的),所以差别只写在这一份 spec 里。
   // 启动器进 argv 而不是拼进命令串:审批的放行键算的是命令本身,拼串会把那道判定一起改掉。
-  const base = spec.launch
+  // 第三支是钩子那种「命令本身就是 argv」:不能让 bash 再解析一遍参数,也不再拼 POSIX_SHELL。
+  const base = argv
     ? {
-        file: spec.launch.file,
-        args: [...spec.launch.args, POSIX_SHELL, '-c', spec.command],
+        file: spec.launch ? spec.launch.file : argv[0],
+        args: spec.launch ? [...spec.launch.args, ...argv] : argv.slice(1),
         shell: false as const,
-        env: { ...spec.launch.env, ...spec.env }
+        env: spec.launch
+          ? { ...spec.launch.env, ...spec.env }
+          : spec.env
+            ? { ...process.env, ...spec.env }
+            : undefined
       }
-    : {
-        file: spec.command,
-        args: [] as string[],
-        shell: SHELL,
-        env: spec.env ? { ...process.env, ...spec.env } : undefined
-      }
+    : spec.launch
+      ? {
+          file: spec.launch.file,
+          args: [...spec.launch.args, POSIX_SHELL, '-c', spec.command],
+          shell: false as const,
+          env: { ...spec.launch.env, ...spec.env }
+        }
+      : {
+          file: spec.command,
+          args: [] as string[],
+          shell: SHELL,
+          env: spec.env ? { ...process.env, ...spec.env } : undefined
+        }
   return spawn(base.file, base.args, {
     cwd: spec.cwd,
-    // stdin 一律 ignore:命令里只要有读输入的动作(cat 不带参数、read、要确认的 rm -i),
-    // 管道会永远等不到内容,只能拖到超时才退
-    stdio: io.kind === 'file' ? ['ignore', io.fd, io.fd] : ['ignore', 'pipe', 'pipe'],
+    // stdin 默认 ignore:命令里只要有读输入的动作(cat 不带参数、read、要确认的 rm -i),
+    // 管道会永远等不到内容,只能拖到超时才退。只有显式给了 stdin 才开那根管。
+    stdio:
+      io.kind === 'file'
+        ? ['ignore', io.fd, io.fd]
+        : [spec.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
     windowsHide: true,
     shell: base.shell,
@@ -72,7 +88,9 @@ export function spawnProc(spec: ProcSpec): ChildProcess {
  */
 export function runProcess(spec: ProcSpec): Promise<ProcOutcome> {
   const startedAt = Date.now()
-  const sink = new MergedSink()
+  // 省略 sink 就是前台那条老路:两条流合成一条、保头保尾。钩子换成 BufferSink,
+  // 要的是原始 stdout,而 outcome.output 那份账目跟着它一起变(见 sink.ts 里那段注释)。
+  const sink: ProcSink = spec.sink ?? new MergedSink()
 
   // 中止先于启动:一条命令都不该跑出去,也不该留个马上就死的子进程让收尾去分辨
   if (spec.signal?.aborted) {
@@ -104,6 +122,15 @@ export function runProcess(spec: ProcSpec): Promise<ProcOutcome> {
         spawnError: describeFsError(error)
       })
       return
+    }
+
+    // stdin 那根管只在给了内容时才开着(见 spawnProc)。'error' 必须接:钩子脚本读一半就退出时,
+    // 这次写入会以 EPIPE 回来,而没监听者的 'error' 直接抛给 uncaughtException ——
+    // 那就是把一个钩子的毛病变成整个应用崩溃。MB 级载荷交给 Node 的背压,不手工分块。
+    if (spec.stdin !== undefined && child.stdin) {
+      const input = child.stdin
+      input.on('error', () => {})
+      input.end(spec.stdin)
     }
 
     let kind: ExitKind = 'exited'

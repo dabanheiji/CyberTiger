@@ -13,6 +13,7 @@
     "src/main/mcp/types.ts",
     "src/main/skills/types.ts",
     "src/main/agents/types.ts",
+    "src/main/hooks/dto.ts",
     "src/main/store/types.ts",
     "src/main/store/modelRef.ts",
     "src/main/tokens/estimate.ts"

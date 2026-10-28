@@ -11,6 +11,7 @@ import type { PermissionLists } from '../tools/permission'
 import type { PermissionMode } from '../store/types'
 import { needsApproval } from '../tools/permission'
 import type { ToolContext, ToolExecResult, ToolRunner } from '../tools/registry'
+import { parseToolArgs } from '../tools/registry'
 
 /**
  * 把审批闸门套在一个已有的 ToolRunner 上。
@@ -79,21 +80,6 @@ export function describeSettlement(settlement: Refusal): string {
   }
 }
 
-/** 参数解析不了的调用不进审批:让内层 runner 给出那句「参数不是合法的 JSON」更准 */
-function parseArgs(argumentsJson: string): Record<string, unknown> | undefined {
-  const trimmed = argumentsJson.trim()
-  if (!trimmed) return {}
-  try {
-    const parsed: unknown = JSON.parse(trimmed)
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>
-    }
-  } catch {
-    // 交给内层 runner 报错
-  }
-  return undefined
-}
-
 export function withApproval(runner: ToolRunner, deps: ApprovalDeps): ToolRunner {
   const { gate, scope, signal, emit, runAllow, mcpToolNames } = deps
 
@@ -102,7 +88,9 @@ export function withApproval(runner: ToolRunner, deps: ApprovalDeps): ToolRunner
     argumentsJson: string,
     context: ToolContext
   ): Promise<ToolExecResult> => {
-    const args = parseArgs(argumentsJson)
+    // 参数解不出对象的调用不进审批:让内层 runner 给出那句「参数不是合法的 JSON」更准。
+    // 这份解析与 `withHooks` 共用 `parseToolArgs`,两层装饰器对「同一次调用是不是同一份参数」必须同值。
+    const args = parseToolArgs(argumentsJson)
     if (!args) return runner.execute(name, argumentsJson, context)
 
     const requirement = needsApproval({
