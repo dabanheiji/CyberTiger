@@ -13,6 +13,7 @@ import type {
   TokenUsage
 } from '../chat/dto'
 import type { ToolContext, ToolExecResult, ToolRunner } from '../tools/registry'
+import type { RunHooks } from '../hooks/set'
 import { estimateRequestTokens, estimateTextTokens } from '../tokens/estimate'
 import {
   isSummaryBlock,
@@ -240,6 +241,15 @@ export interface RunAgentParams {
    * 就是为了防止只传一半 —— 少了 id 的压缩会写出一个对不上行的水位。
    */
   compaction?: { summary: string; historyIds: string[]; run: RunCompactor }
+  /**
+   * 用户自己装的钩子(四个 run 级时机 + 那份说明缓冲区),由 `chat/service.ts` 随整轮现构造。
+   *
+   * 与 `compaction` 同一个注入风格:循环只说「此刻到了哪一步」,该跑哪些钩子、跑完的东西去哪儿
+   * 全在 `hooks/set.ts` —— 那两层规则要能在不起进程、不碰 electron 的条件下被断言。
+   * 省略即这次 run 没有钩子(单测与子 Agent 未接线的那一支);**方法都不会抛**,
+   * 一次坏掉的钩子最多是「这一次没有结论」,不该把模型的一次正常调用改成失败。
+   */
+  hooks?: RunHooks
 }
 
 /** run 的产出;子 agent 的 spawner 依此取回最终回答 */
@@ -265,6 +275,7 @@ export interface RunResult {
 export async function runAgent(params: RunAgentParams): Promise<RunResult> {
   const { scope, signal, store, emit } = params
   const stream = params.stream ?? streamChatCompletion
+  const hooks = params.hooks
   const isRoot = scope.depth === 0
   const budget = params.budget ?? budgetFor()
   // 每一步落库时都盖上这份模型归属:子 Agent 用的是自己那个角色的模型,所以它跟着步骤走,
@@ -297,20 +308,52 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
   let summary = params.compaction?.summary ?? ''
   // 终止步的正文才是答案:停在工具步时 content 为空,继续往后找
   let finalContent = ''
+  // 终局那一步的号:`afterAgent` 要写「跑到哪儿就停了」,而步号活在 for 里,四条出口够不着
+  let step = 0
+  /**
+   * run 级否决的收场:形状与模型报错那一支相同(root 发 `error`,子 run 交回父级那次 `task`
+   * 转成 `tool_result{ok:false}`),而它的 `finalContent` 是**已经做过的那些步**的正文 ——
+   * 库里那些行照旧可见,用户看到的是一句否决,不是这一轮凭空消失。
+   */
+  const blockedExit = (msg: string): RunResult => {
+    if (isRoot) {
+      store.touchConversation(scope.conversationId)
+      emit({ type: 'error', scope, msg })
+    }
+    return { finalContent, aborted: false, error: msg }
+  }
 
   try {
-    for (let step = 1; step <= params.maxSteps + 1; step++) {
+    if (hooks) {
+      // 在任何一步、任何一行入库之前:此刻库里零行,所以这一支的否决不可能造出孤儿 tool_calls
+      await hooks.beforeAgent()
+      const veto = hooks.blocked
+      if (veto) return blockedExit(veto)
+    }
+    for (; step < params.maxSteps + 1;) {
+      step++
       if (signal.aborted) break
       // 超过上限的最后一次调用不给工具,强制模型收尾
       const finalStep = step > params.maxSteps
       const stepTools = finalStep ? [] : tools
 
-      // 每步现拼请求消息,不往 context 里累积这些"循环控制"内容
-      const pinned: ChatCompletionMessage[] = []
-      if (finalStep) pinned.push({ role: 'user', content: STEP_LIMIT_PROMPT })
-      // 第 1 步的请求本来就紧跟在 system prompt 后面,无需锚定
-      if (step > 1 && request) pinned.push(goalAnchor(request))
-      const plan = planContext({
+      // 每步现拼请求消息,不往 context 里累积这些"循环控制"内容。
+      // 顺序是 收尾提示 → 钩子的说明 → 目标锚定:锚定靠「近期性」起作用,必须排在最后,
+      // 而说明要贴着它一起送 —— `planContext` 永不丢弃 pinned,所以钩子那句话不会被裁掉
+      const notes = hooks ? hooks.takeNotes() : []
+      // 说明可能来自两处:`takeNotes()` 那一批是给这一步的,`beforeRequest` 那一批在本步现场追加;
+      // 重拼走同一条路,所以「新增说明排在锚定之前」这条规则只有一份实现
+      const pinnedOf = (extra: string[]): ChatCompletionMessage[] => {
+        const assembled: ChatCompletionMessage[] = []
+        if (finalStep) assembled.push({ role: 'user', content: STEP_LIMIT_PROMPT })
+        for (const note of [...notes, ...extra])
+          assembled.push({ role: 'user', content: `[系统说明] ${note}` })
+        // 第 1 步的请求本来就紧跟在 system prompt 后面,无需锚定
+        if (step > 1 && request) assembled.push(goalAnchor(request))
+        return assembled
+      }
+      let pinned = pinnedOf([])
+      let plan = planContext({
         system,
         head,
         history: messages(),
@@ -318,7 +361,46 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
         tools: stepTools,
         budget
       })
-      const estimatedPrompt = estimateRequestTokens(plan.messages, stepTools)
+      let estimatedPrompt = estimateRequestTokens(plan.messages, stepTools)
+
+      if (hooks) {
+        // 裁剪之后再问:`beforeRequest` 要动的是真的即将发出去的那一份字节,而不是还没定型的原料
+        const outcome = await hooks.beforeRequest({
+          step,
+          maxSteps: params.maxSteps,
+          isFinalStep: finalStep,
+          // 只给名字:整份工具定义是几百上千行 JSON,而钩子要知道的是「这一步有哪些可选」
+          tools: stepTools.map((one) => one.function.name),
+          // 守卫要的三件本层事实:头部几条不许动、尾部是哪几条、尾部怎么重拼
+          fixed: (system ? 1 : 0) + head.length,
+          pinned,
+          messages: plan.messages,
+          pinnedOf
+        })
+        if (outcome.block) {
+          // 中途否决也是「这一轮停了」,所以 `afterAgent` 要报出停在第几步、因为哪一句
+          // (`beforeAgent` 那一支不走到这里:那一轮根本没开始,报「已完成」是谎)
+          await hooks.afterAgent({ step, finalContent, aborted: false, error: outcome.block })
+          return blockedExit(outcome.block)
+        }
+        // 改写与新增说明都要重裁一次:钩子塞进来的百万字照样走那三级裁剪,端点不会因为
+        // 我们听信了一段外部 JSON 就 400。没改写时传回 loop 手里那份原始历史,于是「只加了
+        // 说明」也按 fresh 组装,而不是在已经裁过的中段上再裁一遍。
+        // 实话两句:这份改写**只作用于这一步发出去的那一份** —— `context` 与库里那些行一字不变,
+        // 下一步的钩子拿到的又是原文;而改写中段会让这个会话的提示缓存前缀从那一刻起重新计费。
+        if (outcome.notes.length > 0 || outcome.history !== null) {
+          pinned = pinnedOf(outcome.notes)
+          plan = planContext({
+            system,
+            head,
+            history: outcome.history ?? messages(),
+            pinned,
+            tools: stepTools,
+            budget
+          })
+          estimatedPrompt = estimateRequestTokens(plan.messages, stepTools)
+        }
+      }
 
       const messageId = store.addStep(scope, stamp)
       emit({ type: 'step_start', scope, messageId })
@@ -327,6 +409,9 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
       let reasoning = ''
       let calls: ToolCallRecord[] = []
       let reported: ReportedUsage | undefined
+      // 声明在 try 之外:`afterRequest` 要的正是 `finally` 里记下的那一份,而不是自己再估一遍 ——
+      // 两处各估一次就会出现两个数,而用户看不出哪个是端点真报的
+      let usage: TokenUsage | undefined
       try {
         const result = await stream({
           baseUrl: params.baseUrl,
@@ -351,7 +436,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
         reported = result.usage
       } finally {
         // 无论成功、失败还是中止,已收到的内容都要保留
-        const usage = toUsage(
+        usage = toUsage(
           reported,
           estimatedPrompt,
           estimateTextTokens(content) + estimateTextTokens(reasoning)
@@ -361,6 +446,20 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
         if (content || reasoning || calls.length > 0 || reported) {
           emit({ type: 'usage', scope, messageId, usage, context: plan.meter })
         }
+      }
+
+      // 刚落库那一步的事实原样交给钩子:它在 `persistStep` 之后,所以看到的与库里一致
+      if (hooks) {
+        await hooks.afterRequest({
+          step,
+          content,
+          reasoning,
+          calls,
+          usage: usage ?? null,
+          // 中止那一步的 `calls` 已被清成空数组,光看数组分不清「没调用」与「没来得及」
+          aborted: signal.aborted,
+          model: params.model
+        })
       }
 
       if (content) finalContent = content
@@ -477,18 +576,29 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
       }
     }
 
+    // 三条走到这里的出口(正常收尾 / 收尾步 / 中止)各只经过一次,所以 `afterAgent` 也一次;
+    // 必须早于终局事件 —— 是那条事件把渲染层放开的,晚了钩子就赶不上这一轮的收场
+    if (hooks) {
+      await hooks.afterAgent({ step, finalContent, aborted: signal.aborted, error: '' })
+    }
     if (isRoot) {
       store.touchConversation(scope.conversationId)
       emit({ type: 'done', scope, aborted: signal.aborted })
     }
     return { finalContent, aborted: signal.aborted }
   } catch (error) {
+    const aborted = signal.aborted
+    const msg = aborted ? '' : error instanceof Error ? error.message : String(error)
+    // 模型报错这一支(以及以异常形式到达的中止)同样在终局事件之前触发这一次;
+    // `beforeAgent` 的否决**不**走这里 —— 那一轮根本没开始,报「已完成」是谎
+    if (hooks) {
+      await hooks.afterAgent({ step, finalContent, aborted, error: msg })
+    }
     if (isRoot) store.touchConversation(scope.conversationId)
-    if (signal.aborted) {
+    if (aborted) {
       if (isRoot) emit({ type: 'done', scope, aborted: true })
       return { finalContent, aborted: true }
     }
-    const msg = error instanceof Error ? error.message : String(error)
     if (isRoot) emit({ type: 'error', scope, msg })
     return { finalContent, aborted: false, error: msg }
   }

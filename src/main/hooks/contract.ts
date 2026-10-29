@@ -93,6 +93,13 @@ export type HookTrigger =
       calls: ToolCallRecord[]
       usage: TokenUsage | null
       model: string
+      /**
+       * 这一步是不是被停止打断的。
+       *
+       * 中止时 loop 会把 `calls` 清成空数组,光看那份数组分不清「模型没发起调用」与
+       * 「调用了但没来得及返回」—— 而钩子要的正是后者(它可能在统计被中断的回合)。
+       */
+      aborted: boolean
     }
   | {
       event: 'beforeToolCall'
@@ -195,6 +202,7 @@ export function buildPayload(context: HookPayloadContext): HookPayload {
     }
     data.usage = trigger.usage
     data.model = trigger.model
+    data.aborted = trigger.aborted
   } else if (trigger.event === 'beforeToolCall') {
     clipped.arguments = clip(trigger.call.arguments, ARGUMENTS_CHARS)
     data.call = {

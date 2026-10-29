@@ -236,6 +236,42 @@ describe('system prompt 里的审批说明', () => {
   })
 })
 
+/**
+ * 钩子那句话单独取出来断言:整份 prompt 里到处是「请」「不要」(那是别的规则),
+ * 而祈使回归守卫要钉的只有这一句。
+ */
+function hookSentence(prompt: string): string {
+  return prompt
+    .split('\n')
+    .filter((line) => line.includes('钩子'))
+    .join('\n')
+}
+
+describe('system prompt 里的钩子说明', () => {
+  it('主 / 子两份都有,且写明「被拦下是用户机器上的配置」:否则模型会把那次否决当工具故障重试', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      expect(hookSentence(prompt)).toContain('用户自己安装的钩子程序')
+      expect(hookSentence(prompt)).toContain('不是这次操作本身出了错')
+    }
+  })
+
+  it('那句不含祈使:模型会把「请改用别的方式」当成本轮待办去执行', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      expect(hookSentence(prompt)).not.toMatch(/请|务必|必须|应该|记得/)
+    }
+  })
+
+  it('不随钩子数量、名称、sandboxed 变化:一句档位无关的常量才能保住 system 前缀', () => {
+    // 与审批那句同一条纪律 —— 分成两种措辞会让用户每装或每删一条钩子就打掉一次前缀
+    expect(SYSTEM_PROMPT).not.toMatch(/sandboxed|matcher|HOOK\.md|某条具体的钩子名/)
+  })
+
+  it('不提「消息可能被改写」:改写对模型是透明的,写明只会让它怀疑自己的上下文', () => {
+    expect(SYSTEM_PROMPT).not.toContain('改写')
+    expect(SUB_AGENT_SYSTEM_PROMPT).not.toContain('改写')
+  })
+})
+
 describe('system prompt 里的凭据与私密文件禁令', () => {
   it('主 / 子 Agent 两份都写明,且清单具体到路径:泛指「私密文件」小模型判不出边界', () => {
     for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {

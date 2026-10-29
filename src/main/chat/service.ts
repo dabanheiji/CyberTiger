@@ -81,7 +81,7 @@ import {
 import { createApprovalGate } from './approvals'
 import { withApproval } from './approval'
 import { withHooks } from './hook'
-import { createHookSet } from '../hooks/set'
+import { createHookSet, type HookRun } from '../hooks/set'
 import { hookRegistry } from '../hooks/registry'
 import { jobManager } from '../process/jobs'
 import { createBackgroundJobTool } from '../tools/jobs'
@@ -729,7 +729,23 @@ interface SpawnerContext {
    * 模型(或小模型的一时兴起)走 `task` 就绕开了整道审批。
    */
   approval: ApprovalContext
+  /**
+   * 父级那一份钩子声明快照的 `forRun`,子 run 用它现建属于自己的那一份。
+   * 与 `approval` 同一形状的接线理由:钩子只给主 Agent 装的话,「让模型走 `task`
+   * 绕不开它」这句话就是假的。
+   *
+   * 参数只有子 run 独有的那三件事实(自己的 scope、这次 `task` 调用上下文里的 jail、
+   * 派下来的任务原文),声明快照、目录、沙箱设置、中止信号与步数上限都已在闭包里 ——
+   * 一条线传下去,像 `jail` 那样:多一个字段就多一处忘的机会。
+   */
+  hooks: SubAgentHooks
 }
+
+/**
+ * 子 run 的钩子状态:与父级共享同一份声明快照与同一份日志,但各有独立的说明缓冲区、
+ * 独立 `once` 状态与独立的改写链 —— 子是另一个 run,它那份请求里没有父级的消息。
+ */
+type SubAgentHooks = (scope: RunScope, jail: ToolContext['jail'], request: string) => HookRun
 
 /** 构造 task 工具的 spawner:跑一次独立上下文的子 agent run,返回它的最终结论 */
 function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
@@ -774,14 +790,20 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
     // 角色白名单与模型本次指定的白名单取交集
     const tools = filterTools(pool, [role.tools, req.tools])
     // 与父级同一个审批闸门与同一份放行集:派生子 Agent 不是绕过审批的通道
-    const runner = withGate(
-      createToolRunner(tools),
-      ctx.approval,
-      scope,
-      ctx.workspace,
-      call.jail,
-      ctx.emit,
-      ctx.signal
+    // 钩子同样套在闸门外面(顺序与理由见 chat/hook.ts 那段),而 jail 用的是这次 `task`
+    // 调用上下文里的那一份 —— 父子同一道边界这条既有保证自动覆盖钩子看到的边界结论
+    const hooks = ctx.hooks(scope, call.jail, req.prompt)
+    const runner = withHooks(
+      withGate(
+        createToolRunner(tools),
+        ctx.approval,
+        scope,
+        ctx.workspace,
+        call.jail,
+        ctx.emit,
+        ctx.signal
+      ),
+      hooks.toolDeps
     )
     // 只有真拿得到 load_skill 时才给它 skill 目录,避免提示词与实际工具不一致
     const canLoadSkills = tools.some((t) => t.name === loadSkillTool.name)
@@ -820,7 +842,11 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
       emit: ctx.emit,
       // 按子 Agent 自己那个模型的窗口裁剪:角色的 AGENT.md 可以指定别的模型,
       // 沿用父级的窗口就会算错预算
-      budget: budgetFor(connection.contextWindow)
+      budget: budgetFor(connection.contextWindow),
+      // 子 run 的四个 run/请求时机:与上面 `hooks.toolDeps` 来自同一次 `ctx.hooks` 调用,
+      // 所以「一个 run 的钩子只有一份状态」这条在子那侧同样由结构保证。
+      // 不传 `compaction`,同理也不继承父级的说明 —— 父的 `beforeAgent` 讲的是父那一轮
+      hooks: hooks.runHooks
     })
 
     if (result.error && !result.finalContent) {
@@ -948,6 +974,11 @@ async function startRun(input: StartRunInput): Promise<void> {
   const definitions = getAllTools()
   // 审批上下文与工具快照同一时刻建:MCP 工具的名字与「哪些算外部工具」必须是同一批
   const approval = createApprovalContext(notify)
+  // 钩子声明同样在这一刻拍一次:跑到一半改钩子设置不影响这一轮,而已经触发的下一次要按
+  // 哪份名单算必须有唯一答案(与 `mcpToolNames` 同一条纪律)。
+  // 建在这里而不是建在下面那次 `forRun` 的位置,是因为子 Agent 的 spawner 也要拿它 ——
+  // 父子由同一个 `hookSet` 现建,「一次 run 的声明快照只有一份」在这里就是结构保证
+  const hookSet = createHookSet(hookRegistry.getEnabled())
 
   const tools = [...definitions]
   // 提问工具与 task 一样按 run 现构造(要闭包握住这次的 emit / scope / signal),因此不进
@@ -969,7 +1000,21 @@ async function startRun(input: StartRunInput): Promise<void> {
           parentTools: definitions,
           workspace,
           emit,
-          approval
+          approval,
+          // 子 run 的钩子状态由父级同一份声明快照现建。闭包握住「父级已经拍好、子只需照抄」
+          // 的那几件(目录、沙箱设置、中止信号、子那侧的步数上限),调用方只给属于子的那三件。
+          // jail 特意从参数来(`call.jail`)而不是抄这里的外层变量:与 `runAgent({jail})`
+          // 走的是同一个来源,父子同一道边界才有一条真值
+          hooks: (subScope, subJail, subRequest) =>
+            hookSet.forRun({
+              scope: subScope,
+              workspace,
+              jail: subJail,
+              sandbox: sandboxSettings,
+              signal,
+              request: subRequest,
+              maxSteps: SUB_AGENT_MAX_STEPS
+            })
         }),
         // 与 system prompt 里的角色目录取同一份名单,保证 schema 与提示词一致
         { agents: agentRegistry.getEnabledCustom().map((a) => a.name) }
@@ -1010,11 +1055,11 @@ async function startRun(input: StartRunInput): Promise<void> {
     ...historyBody(items, current)
   ]
 
-  // 钩子声明与工具快照、审批名单同一时刻拍一次:跑到一半改钩子设置不影响这一轮,
-  // 而已经触发的下一次要按哪份名单算必须有唯一答案(与 `mcpToolNames` 同一条纪律)。
-  // 编排层在这里建好、随整轮固定 —— 派发规则与说明缓冲区都归 `hooks/set.ts`,
-  // 这一层只负责把那次 run 的事实(范围、目录、边界、中止信号、本轮要回应的话)交给它。
-  const hooks = createHookSet(hookRegistry.getEnabled()).forRun({
+  // 主 run 那一份钩子状态:派发规则与说明缓冲区都归 `hooks/set.ts`,这一层只负责把那次
+  // run 的事实(范围、目录、边界、中止信号、本轮要回应的话)交给它。
+  // `hookSet` 在构造工具池之前就拍好了(子 Agent 的 spawner 要用同一个),这里才 `forRun`,
+  // 因为 `request` 要等历史组完才读得到
+  const hooks = hookSet.forRun({
     scope,
     workspace,
     jail,
@@ -1051,7 +1096,11 @@ async function startRun(input: StartRunInput): Promise<void> {
       summary: current,
       historyIds: items.map((item) => item.id),
       run: createRunCompactor(conversationId, connection, signal)
-    }
+    },
+    // 同一个 `forRun` 的另外半边:四个 run/请求时机活在循环里,而说明缓冲区两边共用。
+    // 与上面 `hooks.toolDeps` 来自同一次调用,所以「一次 run 的钩子只有一份状态」这条
+    // 由结构保证 —— 分两次建就会出现「工具那半边的说明进不了请求」那种读不出来源的 bug
+    hooks: hooks.runHooks
   })
 }
 

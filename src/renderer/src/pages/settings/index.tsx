@@ -14,6 +14,7 @@ import SandboxPanel from './SandboxPanel'
 import McpConfigEditor from './McpConfigEditor'
 import SkillsPanel from './SkillsPanel'
 import AgentsPanel from './AgentsPanel'
+import HooksPanel from './HooksPanel'
 
 interface SettingsPageProps {
   appearance: AppearanceSettings
@@ -25,7 +26,16 @@ interface SettingsPageProps {
 }
 
 /** 全部 tab 的 key:`?tab=xxx` 深链只认这些值,认不出的一律退回默认那档 */
-const TAB_KEYS = ['model', 'appearance', 'permission', 'sandbox', 'mcp', 'skills', 'agents']
+const TAB_KEYS = [
+  'model',
+  'appearance',
+  'permission',
+  'sandbox',
+  'mcp',
+  'skills',
+  'agents',
+  'hooks'
+]
 
 /**
  * 初始停在哪个 tab。
@@ -101,7 +111,8 @@ function SettingsPage({
               },
               { key: 'mcp', label: 'MCP 服务', children: <McpConfigEditor /> },
               { key: 'skills', label: 'Skills', children: <SkillsPanel /> },
-              { key: 'agents', label: '子 Agent', children: <AgentsPanel /> }
+              { key: 'agents', label: '子 Agent', children: <AgentsPanel /> },
+              { key: 'hooks', label: '钩子', children: <HooksPanel /> }
             ]}
             // 分区内容可能很长,滚动时让 tab 栏留在视野内
             tabBarStyle={{

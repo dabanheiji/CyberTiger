@@ -214,11 +214,14 @@ describe('buildPayload:另外五个事件的 data', () => {
         reasoning: '',
         calls: [],
         usage: { prompt: 10, completion: 3, estimated: false },
-        model: 'qwen3.5:4b'
+        model: 'qwen3.5:4b',
+        aborted: false
       })
     )
     expect(payload.data.messages).toBeUndefined()
     expect(payload.data.model).toBe('qwen3.5:4b')
+    // `aborted` 是中止那一支唯一的线索:那时 `calls` 已被清空,光看数组分不清「没调用」与「没来得及」
+    expect(payload.data.aborted).toBe(false)
   })
 
   it('超长的正文与推理各切各的并都点名', () => {
@@ -230,12 +233,14 @@ describe('buildPayload:另外五个事件的 data', () => {
         reasoning: longText(3000),
         calls: [{ id: 'c1', name: 'run_command', arguments: longText(5000) }],
         usage: null,
-        model: 'm'
+        model: 'm',
+        aborted: true
       })
     )
     expect(payload.data.content).toHaveLength(8000)
     expect(payload.data.reasoning).toHaveLength(2000)
     expect(payload.data.truncated).toEqual(['content', 'reasoning', 'calls'])
+    expect(payload.data.aborted).toBe(true)
   })
 
   it('beforeToolCall 同时给原始串与解析结果:被模型写坏的那条调用也要看得见', () => {
