@@ -549,4 +549,30 @@ describe('taskStateNote:压缩后续跑靠它', () => {
     expect(note).toContain('get_current_time({}) → 失败:超时')
     expect(note).not.toMatch(/请重新|必须重新调用|每次都要/)
   })
+
+  it('调用很多时只留最近 8 条,更早的写成一句省略数', () => {
+    const executed = Array.from({ length: 10 }, (_, i) => ({
+      name: `tool${i}`,
+      arguments: '{}',
+      ok: true,
+      result: '好'
+    }))
+    const note = taskStateNote({ ...base, executed })
+
+    // 更早的两条已经在摘要覆盖的历史里,留下它们只会把便签撑长
+    expect(note).not.toContain('tool0(')
+    expect(note).not.toContain('tool1(')
+    expect(note).toContain('tool2(')
+    expect(note).toContain('tool9(')
+    expect(note).toContain('更早的 2 次调用已省略')
+  })
+
+  it('超长参数按 200 字截断并压空白:一条命令不能吃掉整段额度', () => {
+    const note = taskStateNote({
+      ...base,
+      executed: [{ name: 'run_command', arguments: 'x'.repeat(500), ok: true, result: '好' }]
+    })
+    expect(note).toContain('x'.repeat(200))
+    expect(note).not.toContain('x'.repeat(201))
+  })
 })

@@ -52,6 +52,14 @@ export interface ToolDefinition {
    * 为 true 时,历史回放不再把旧结果给模型,避免模型复用过期数据而不重新调用。
    */
   volatile?: boolean
+  /**
+   * 本轮内是否允许「同名 + 同参」复用上一次的结果。默认 false。
+   *
+   * 只有纯函数 / 幂等只读工具才配标它:读文件、加载 skill 再读一次不会有新信息。
+   * 写文件、跑命令、起后台作业这类会改变本机的工具绝不能标 —— 缓存命中等于把一次
+   * 真实的副作用吞掉,而模型会以为它做了。`volatile` 的工具即使标了也不复用。
+   */
+  reuseInRun?: boolean
   /** 执行工具;返回给模型看的文本。抛错会被注册表捕获并转成错误说明 */
   execute: (args: Record<string, unknown>, context: ToolContext) => Promise<string> | string
 }
@@ -60,4 +68,12 @@ export interface ToolExecResult {
   ok: boolean
   /** 回传给模型的文本;失败时是错误说明 */
   result: string
+  /**
+   * 这份结论不是一次执行,而是本轮对这次调用给出的定论(审批拒绝、钩子拦下、超时)。
+   * 同轮同参再发可以直接复用,不再走闸门与钩子 —— 那几样都没有真的动过机器。
+   *
+   * 只有装饰器会标它;工具自己不要标(工具返回的失败是一次真实执行的结果,
+   * 换个时机再发可能就成功了)。
+   */
+  reusable?: boolean
 }

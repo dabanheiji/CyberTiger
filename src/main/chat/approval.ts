@@ -126,7 +126,8 @@ export function withApproval(runner: ToolRunner, deps: ApprovalDeps): ToolRunner
       runAllow.add(request.runAllowKey)
       return runner.execute(name, argumentsJson, context)
     }
-    return { ok: false, result: describeSettlement(settlement) }
+    // 没批准不是一次执行:同轮同参再发拿回同一条结论,不再打断用户第二次
+    return { ok: false, result: describeSettlement(settlement), reusable: true }
   }
 
   return {

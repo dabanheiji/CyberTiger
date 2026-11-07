@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ApprovalRequest, IpcResult, PendingApprovalDto } from '../../../main/chat/dto'
+import type {
+  ApprovalRequest,
+  IpcResult,
+  PendingApprovalDto,
+  PendingQuestionDto
+} from '../../../main/chat/dto'
 import type { ModelRef } from '../../../main/store/types'
 import { ensureStep, mapCall, mapStep, type AgentStep } from '../lib/agentSteps'
 
@@ -9,11 +14,25 @@ export type { AgentStep, StreamingToolCall } from '../lib/agentSteps'
 export interface PendingQuestion {
   /** 回答案时凭它认领:主进程那边的等待挂在这个 id 上 */
   questionId: string
+  /** 提问所属会话:卡片只显示当前会话那一条 */
+  conversationId: string
   /** 发起提问的那次工具调用 id:它的结果到手即表示这次等待已经了结 */
   callId: string
   question: string
   options: string[]
   multiSelect: boolean
+}
+
+/** 等待表里的载荷是嵌套的 `AskUserQuestion`,与事件流那条拍平成同一个形状 */
+function toPendingQuestion(dto: PendingQuestionDto): PendingQuestion {
+  return {
+    questionId: dto.questionId,
+    conversationId: dto.conversationId,
+    callId: dto.callId,
+    question: dto.question.question,
+    options: dto.question.options,
+    multiSelect: dto.question.multiSelect
+  }
 }
 
 /** 正在进行中的 Agent run */
@@ -48,6 +67,8 @@ interface UseAgentStreamResult {
    * 工具执行上 —— 那时界面上没有任何地方能回答它。靠主进程的等待表把卡片填回来。
    */
   detachedApproval: PendingApprovalDto | null
+  /** 不属于界面上正在跟踪的那个 run 的提问(重载后从主进程等待表拉回来的那条) */
+  detachedQuestion: PendingQuestion | null
   /** 启动 Agent run,返回 IPC 结果;成功后开始接收流式事件 */
   start: (conversationId: string, ref: ModelRef) => Promise<IpcResult<{ runId: string }>>
   /** 中止当前 run */
@@ -58,6 +79,8 @@ interface UseAgentStreamResult {
    * 不等那次 tool_result —— 审批已了结这件事本身就是等待表里没这条的原因。
    */
   refreshApprovals: (conversationId: string) => Promise<void>
+  /** 重读一次主进程的提问等待表;调用点与理由与 refreshApprovals 完全相同 */
+  refreshQuestions: (conversationId: string) => Promise<void>
 }
 
 /**
@@ -68,6 +91,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
   const [streaming, setStreaming] = useState<StreamingRun | null>(null)
   // 等待表里读来的、当前界面没法挂到流式状态上的那条审批(见 UseAgentStreamResult 注释)
   const [detachedApproval, setDetachedApproval] = useState<PendingApprovalDto | null>(null)
+  const [detachedQuestion, setDetachedQuestion] = useState<PendingQuestion | null>(null)
   // 事件监听器里读取最新值,避免闭包拿到过期 state
   const streamingRef = useRef<StreamingRun | null>(null)
   const optionsRef = useRef(options)
@@ -139,6 +163,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
             ...current,
             pendingQuestion: {
               questionId: event.questionId,
+              conversationId: event.scope.conversationId,
               callId: event.callId,
               question: event.question,
               options: event.options,
@@ -225,5 +250,32 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
     [update]
   )
 
-  return { streaming, detachedApproval, start, abort, refreshApprovals }
+  const refreshQuestions = useCallback(
+    async (conversationId: string): Promise<void> => {
+      const res = await window.api.chat.pendingQuestions()
+      if (!res.success) return
+      const found = res.data.find((item) => item.conversationId === conversationId)
+      const hit = found ? toPendingQuestion(found) : null
+      const current = streamingRef.current
+      if (current?.conversationId === conversationId) {
+        // 与审批同一条纪律:这一轮界面上还在跟,卡片以事件流写进 pendingQuestion 的那份为准
+        if (hit && !current.pendingQuestion) update({ ...current, pendingQuestion: hit })
+        else if (!hit && current.pendingQuestion) update({ ...current, pendingQuestion: null })
+        setDetachedQuestion(null)
+        return
+      }
+      setDetachedQuestion(hit)
+    },
+    [update]
+  )
+
+  return {
+    streaming,
+    detachedApproval,
+    detachedQuestion,
+    start,
+    abort,
+    refreshApprovals,
+    refreshQuestions
+  }
 }

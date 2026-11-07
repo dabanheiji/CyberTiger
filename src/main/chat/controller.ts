@@ -12,6 +12,7 @@ import {
   answerQuestion as answerQuestionService,
   decideApproval as decideApprovalService,
   pendingApprovals as listPendingApprovals,
+  pendingQuestions as listPendingQuestions,
   hasActiveWork,
   setConversationWorkspace
 } from './service'
@@ -26,11 +27,13 @@ import type {
   ApprovalRequest,
   decideApprovalDto,
   PendingApprovalDto,
+  PendingQuestionDto,
   ChatStreamEvent,
   CompactReport,
   IpcResult
 } from './dto'
 import type { Conversation, Message } from './sql'
+import { ensureProjectRoot } from '../project'
 
 /** 统一包装 handler 结果,异常转为 { success: false, msg } */
 function run<T>(fn: () => T): IpcResult<T> {
@@ -145,6 +148,9 @@ export async function pickWorkspace(e: IpcMainInvokeEvent): Promise<IpcResult<st
       ? await dialog.showOpenDialog(win, options)
       : await dialog.showOpenDialog(options)
     if (result.canceled || result.filePaths.length === 0) return { success: true, data: null }
+    // 选中即建出空的 `.cybertiger`:用户在这里只是挑目录,还没有会话行可写,
+    // 所以脚手架落在这一层;失败只记日志,不影响选择本身
+    ensureProjectRoot(result.filePaths[0])
     return { success: true, data: result.filePaths[0] }
   } catch (error) {
     return { success: false, msg: error instanceof Error ? error.message : String(error) }
@@ -201,4 +207,12 @@ export function decideApproval(_e: IpcMainInvokeEvent, dto: decideApprovalDto): 
  */
 export function pendingApprovals(): IpcResult<PendingApprovalDto[]> {
   return run(() => listPendingApprovals())
+}
+
+/**
+ * 当前还挂着的提问。
+ * 与 `pendingApprovals` 同一个洞:重载后流式状态归零,而主进程仍阻塞在那次 ask_user 上。
+ */
+export function pendingQuestions(): IpcResult<PendingQuestionDto[]> {
+  return run(() => listPendingQuestions())
 }

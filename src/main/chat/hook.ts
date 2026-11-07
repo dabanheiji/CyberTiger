@@ -33,7 +33,8 @@ export function withHooks(runner: ToolRunner, deps: ToolHookDeps): ToolRunner {
     // 而**这一次调用照样要被看见**(钩子可能在审计谁在发坏参数),所以不提前 return
     const args = parseToolArgs(argumentsJson) ?? null
     const veto = await deps.beforeToolCall({ call, args, step })
-    if (veto) return { ok: false, result: veto }
+    // 钩子拦下不是一次执行:同轮同参再发拿回同一条否决,也不再触发一次钩子
+    if (veto) return { ok: false, result: veto, reusable: true }
 
     const startedAt = Date.now()
     const exec = await runner.execute(name, argumentsJson, context)

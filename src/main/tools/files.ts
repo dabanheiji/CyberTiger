@@ -13,17 +13,18 @@ const READ_MAX_CHARS = 24_000
 /** 超过这个大小的文件不整体读进内存 —— 多半是构建产物或二进制 */
 const READ_MAX_FILE_BYTES = 2 * 1024 * 1024
 
-/** 判断是否二进制时只扫描开头这么多字节 */
-const BINARY_SNIFF_BYTES = 8_000
-
 /** 报尺寸用的短格式,几十 KB 与几十万字节对模型是同一个量级的噪声 */
 function formatSize(bytes: number): string {
   return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`
 }
 
-/** 文本文件不会出现 NUL,开头有 NUL 就按二进制处理 */
+/**
+ * 文本文件不会出现 NUL,任何位置有 NUL 就按二进制处理。
+ * 扫全文而不是只嗅开头:某些二进制(带长头的归档、混在文本里的资源段)前 8 KB 全是可打印字节,
+ * 只嗅开头会把它们当文本返回一屏乱码。文件上限是 2 MB,一次线性扫描的成本可以接受。
+ */
 function looksBinary(buffer: Buffer): boolean {
-  return buffer.subarray(0, BINARY_SNIFF_BYTES).includes(0)
+  return buffer.includes(0)
 }
 
 /** offset 从 1 起;省略即第一行,给了但不是正整数就拒绝,不悄悄当 1 */
@@ -38,6 +39,8 @@ function offsetOf(value: unknown): number {
 
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
+  // 同一轮里再次读同一个路径拿到的是同一份字节;写文件的调用会清空缓存,所以不会读到旧内容
+  reuseInRun: true,
   description:
     '读取一个文本文件,返回不带行号的原文。路径可以是绝对路径、以 ~ 开头的路径,' +
     '或相对本次会话工作空间的路径(未设置工作空间时相对应用当前目录);' +
@@ -83,7 +86,7 @@ export const readFileTool: ToolDefinition = {
       throw new Error(`读取 ${filePath} 失败:${describeFsError(error)}`)
     }
     if (looksBinary(buffer)) {
-      throw new Error(`${filePath} 看起来是二进制文件(开头出现了 NUL 字节),本工具只读文本`)
+      throw new Error(`${filePath} 看起来是二进制文件(内容里出现了 NUL 字节),本工具只读文本`)
     }
     if (buffer.length === 0) return annotate(`${filePath} 是空文件(0 字节)`, target, workspace)
 

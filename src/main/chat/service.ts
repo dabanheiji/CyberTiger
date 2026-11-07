@@ -20,8 +20,9 @@ import type {
   ApprovalRequest,
   decideApprovalDto,
   PendingApprovalDto,
-  AskUserAnswer,
+  PendingQuestionDto,
   AskUserQuestion,
+  AskUserSettlement,
   ChatStreamEvent,
   CompactReport,
   RunScope,
@@ -47,7 +48,6 @@ import {
   type CompactUnit
 } from '../agent/compact'
 import {
-  buildHistory,
   historyBody,
   skillsCatalog,
   systemPromptMessage,
@@ -55,7 +55,7 @@ import {
 } from '../agent/history'
 import { createAskUserTool, type AskUserHandler } from '../agent/ask'
 import { createQuestionGate } from './questions'
-import { workspaceNote } from '../agent/prompt'
+import { modelNote, workspaceNote } from '../agent/prompt'
 import { execFor, jailFor } from '../sandbox'
 import { engineProbe } from '../sandbox/preflight'
 import {
@@ -79,6 +79,7 @@ import {
   type ToolRunner
 } from '../tools/registry'
 import { createApprovalGate } from './approvals'
+import type { ChatCompletionMessage } from './llm'
 import { withApproval } from './approval'
 import { withHooks } from './hook'
 import { createHookSet, type HookRun } from '../hooks/set'
@@ -87,6 +88,8 @@ import { jobManager } from '../process/jobs'
 import { createBackgroundJobTool } from '../tools/jobs'
 import { stricterMode, type PermissionLists } from '../tools/permission'
 import type { PermissionMode, PermissionSettings } from '../store/types'
+import { ensureProjectRoot } from '../project'
+import { mcpManager } from '../mcp/manager'
 
 interface ActiveRun {
   conversationId: string
@@ -103,13 +106,22 @@ const questionGate = createQuestionGate()
 
 /**
  * 把用户的选择交回给正阻塞着的那次 ask_user 调用。
- * id 对不上说明这次提问已经了结(答案已到手、本轮已中止、会话被删),
+ * id 对不上说明这次提问已经了结(答案已到手、本轮已中止、等到超时、会话被删),
  * 这种情况要报错让界面知道「这条答案没处送」,而不是悄悄丢掉。
  */
 export function answerQuestion(questionId: string, answers: string[]): void {
   if (!questionGate.answer(questionId, answers)) {
     throw new Error('这个问题已经回答过,或者已经失效了')
   }
+}
+
+/**
+ * 还挂着的提问。
+ * 与 `pendingApprovals` 同一个洞:渲染层 Cmd+R 之后流式状态归零、事件全被 runId 过滤,
+ * 而主进程仍阻塞在那次 ask_user 调用上 —— 不把卡片补回来,这一轮就再也没有地方能回答。
+ */
+export function pendingQuestions(): PendingQuestionDto[] {
+  return questionGate.list()
 }
 
 /** 正等着用户批准的审批请求(`withApproval` 在那儿等) */
@@ -170,13 +182,16 @@ function readLists(settings: PermissionSettings): PermissionLists {
  * 而点「完全访问」不该让已经按严档位跑了几步的那一轮突然免审 ——
  * 所以读到的设置与本次基准取更严的那一档,放宽只能等下一次 startRun。
  */
-function createApprovalContext(notify?: (request: ApprovalRequest) => void): ApprovalContext {
+function createApprovalContext(
+  workspace: string,
+  notify?: (request: ApprovalRequest) => void
+): ApprovalContext {
   const settings = readPermissions()
   return {
     lists: readLists(settings),
     startMode: settings.mode ?? 'ask',
     runAllow: new Set<string>(),
-    mcpToolNames: getMcpToolNames(),
+    mcpToolNames: getMcpToolNames(workspace),
     notify
   }
 }
@@ -336,7 +351,11 @@ export function setConversationWorkspace(
   conversationId: string,
   workspace: string
 ): Database.RunResult {
-  return getDb().prepare(chatSql.conversations.setWorkspace).run(workspace.trim(), conversationId)
+  const dir = workspace.trim()
+  const result = getDb().prepare(chatSql.conversations.setWorkspace).run(dir, conversationId)
+  // 选中目录即建出空的 `.cybertiger`;失败只记日志,不让「选目录」这个动作失败
+  ensureProjectRoot(dir)
+  return result
 }
 
 /**
@@ -444,18 +463,19 @@ async function compactUnits(
 
 /**
  * 压缩判断所需的规模:固定开销 + 当前摘要 + 模型配置的窗口。
- * 固定开销的口径必须与 planContext 一致(同一份 system prompt 与工具定义),所以现取而不另算 ——
+ * 固定开销的口径必须与 planContext 一致,所以用的就是这次真正要发出去的那条 system
+ * (含工作空间说明、模型说明与两份目录),而不是拿一条空历史估出来的 ——
  * 两处一旦分叉,触发线就算歪,要么早压要么压不动。
  */
 function fixedSizing(
   definitions: ToolDefinition[],
   contextWindow: number | undefined,
   summary: string,
-  workspace: string
+  system: ChatCompletionMessage
 ): CompactSizing {
   const tools = createToolRunner(definitions).toChatCompletionTools()
   return {
-    fixedTokens: estimateRequestTokens(buildHistory([], definitions, '', workspace), tools),
+    fixedTokens: estimateRequestTokens([system], tools),
     summaryTokens: estimateTextTokens(summary),
     // 压缩的比例全部相对「模型配置的窗口」,不是相对裁剪后的额度
     window: budgetFor(contextWindow).window
@@ -485,15 +505,21 @@ async function compactBeforeRun(
   target: CompactTarget,
   conversationId: string,
   definitions: ToolDefinition[],
-  options: { force: boolean; summary: string; contextWindow?: number; workspace: string }
+  options: {
+    force: boolean
+    summary: string
+    contextWindow?: number
+    workspace: string
+    system: ChatCompletionMessage
+  }
 ): Promise<UnitCompactResult> {
   const messages = listMessagesAfterWatermark(conversationId)
-  const units = toCompactUnits(toIdentifiedMessages(messages, definitions))
+  const units = toCompactUnits(toIdentifiedMessages(messages, definitions, options.workspace))
   return compactUnits(
     target,
     conversationId,
     units,
-    fixedSizing(definitions, options.contextWindow, options.summary, options.workspace),
+    fixedSizing(definitions, options.contextWindow, options.summary, options.system),
     { force: options.force, summary: options.summary }
   )
 }
@@ -557,6 +583,7 @@ export async function compactConversationManually(dto: compactDto): Promise<Comp
   compacting.add(dto.conversationId)
   try {
     const { summary } = getSummaryState(dto.conversationId)
+    const workspace = getWorkspace(dto.conversationId)
     const result = await compactBeforeRun(
       {
         baseUrl: connection.baseUrl,
@@ -565,12 +592,15 @@ export async function compactConversationManually(dto: compactDto): Promise<Comp
         signal: controller.signal
       },
       dto.conversationId,
-      getAllTools(),
+      getAllTools(workspace),
       {
         force: true,
         summary,
         contextWindow: connection.contextWindow,
-        workspace: getWorkspace(dto.conversationId)
+        workspace,
+        // 手动压缩时手里没有 run 那份 jail 快照,边界那半句按「什么都没开」算 ——
+        // 这里只影响固定开销的估算(差一两句,不影响触发线量级),真正的压缩结论不看它
+        system: systemPromptMessage(workspace, false, false, connection)
       }
     )
     return toReport(result)
@@ -610,6 +640,9 @@ export function createFirstMessage(dto: createFirstMessageDto): string {
   })
 
   createChat()
+
+  // 草稿期选好的目录在建会话时就补出 `.cybertiger`(与已建会话那条写路径同一个动作)
+  ensureProjectRoot(workspace)
 
   return conversationId
 }
@@ -750,7 +783,7 @@ type SubAgentHooks = (scope: RunScope, jail: ToolContext['jail'], request: strin
 /** 构造 task 工具的 spawner:跑一次独立上下文的子 agent run,返回它的最终结论 */
 function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
   return async (req: SpawnRequest, call: ToolContext): Promise<string> => {
-    const requested = agentRegistry.resolve(req.agent)
+    const requested = agentRegistry.resolve(req.agent, ctx.workspace)
     // 角色名是模型自己填的,抄错或凭空编一个都可能。整个子任务不该为此失败 ——
     // 用户要的是"派个子 Agent 把事办了",回退到通用角色比直接报错更符合意图。
     if (!requested && req.agent) {
@@ -827,7 +860,10 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
               call.jail !== undefined,
               call.jail?.exec?.state === 'confined'
             ) +
-            (canLoadSkills ? skillsCatalog() : '')
+            // 子 Agent 自己那次解析出的连接,不是父级的:角色可以指定别的服务商与模型,
+            // 抄父级会让这句变成一个写进提示词的假名字
+            modelNote(connection) +
+            (canLoadSkills ? skillsCatalog(ctx.workspace) : '')
         },
         { role: 'user', content: req.prompt }
       ],
@@ -864,18 +900,24 @@ function createSubAgentSpawner(ctx: SpawnerContext): SubAgentSpawner {
  *
  * 每次提问现取一个 questionId,渲染层提交答案时凭它认领;callId 只用于让界面在同一次
  * 调用的结果到手时收起卡片,两个 id 都由同一条事件带过去。
- * 信号已经中止就什么都不发:gate 会当场按「没拿到回答」了结,而此刻也没有界面在等这个问题。
+ * 登记进 gate 的那份载荷同时用于重载后补卡片(`pendingQuestions`),所以 `conversationId`
+ * 必须在这里带上 —— 事件里有 `scope`,但 gate 不读事件。
+ * 信号已经中止就什么都不发:gate 会当场按「本轮已中止」了结,而此刻也没有界面在等这个问题。
  */
 function createAsker(
   scope: RunScope,
   signal: AbortSignal,
   emit: (event: ChatStreamEvent) => void
 ): AskUserHandler {
-  return (question: AskUserQuestion, callId: string): Promise<AskUserAnswer> => {
-    if (signal.aborted) return Promise.resolve(null)
+  return (question: AskUserQuestion, callId: string): Promise<AskUserSettlement> => {
+    if (signal.aborted) return Promise.resolve({ kind: 'aborted' })
     const questionId = uuidv4()
     emit({ type: 'ask_user', scope, callId, questionId, ...question })
-    return questionGate.open(questionId, signal)
+    return questionGate.open(
+      questionId,
+      { questionId, conversationId: scope.conversationId, callId, question },
+      signal
+    )
   }
 }
 
@@ -970,15 +1012,20 @@ async function startRun(input: StartRunInput): Promise<void> {
     emit({ type: 'error', scope, msg: error instanceof Error ? error.message : String(error) })
     return
   }
+  // 项目级 MCP 配置可能刚被改过(文件工具写 mcp.json 后不会通知主进程),这里重新同步一次连接。
+  // 必须 await:被删除或改掉的项目 server 要先摘出登记表,下面的工具快照才不会再带上它的工具。
+  // 只等「读配置 + 摘旧 server」,新 server 的连接仍在后台进行(见 `reloadScope`),
+  // 所以新工具可能要到下一次 run 才出现在快照里 —— 等它会把启动拖在一次网络握手上。
+  await mcpManager.ensureWorkspace(workspace)
   // 工具快照在 run 开始时固定,保证本次 run 的执行范围与发给模型的列表严格一致
-  const definitions = getAllTools()
+  const definitions = getAllTools(workspace)
   // 审批上下文与工具快照同一时刻建:MCP 工具的名字与「哪些算外部工具」必须是同一批
-  const approval = createApprovalContext(notify)
+  const approval = createApprovalContext(workspace, notify)
   // 钩子声明同样在这一刻拍一次:跑到一半改钩子设置不影响这一轮,而已经触发的下一次要按
   // 哪份名单算必须有唯一答案(与 `mcpToolNames` 同一条纪律)。
   // 建在这里而不是建在下面那次 `forRun` 的位置,是因为子 Agent 的 spawner 也要拿它 ——
   // 父子由同一个 `hookSet` 现建,「一次 run 的声明快照只有一份」在这里就是结构保证
-  const hookSet = createHookSet(hookRegistry.getEnabled())
+  const hookSet = createHookSet(hookRegistry.getEnabled(undefined, workspace))
 
   const tools = [...definitions]
   // 提问工具与 task 一样按 run 现构造(要闭包握住这次的 emit / scope / signal),因此不进
@@ -1017,19 +1064,28 @@ async function startRun(input: StartRunInput): Promise<void> {
             })
         }),
         // 与 system prompt 里的角色目录取同一份名单,保证 schema 与提示词一致
-        { agents: agentRegistry.getEnabledCustom().map((a) => a.name) }
+        { agents: agentRegistry.getEnabledCustom(workspace).map((a) => a.name) }
       )
     )
   }
 
   // 请求前自动压缩:没过触发线什么也不做;摘要调用失败也不阻断本轮 ——
   // 带着全部历史继续跑,由 planContext 的硬上限兜底,总比直接拒绝对话好。
+  // system 在压缩之前算好:触发线要按真正发出去的那条前缀估固定开销,
+  // 压完再算等于让这一步的判定看着一份更小的请求。
+  const systemMessage = systemPromptMessage(
+    workspace,
+    jail !== undefined,
+    jail?.exec?.state === 'confined',
+    connection
+  )
   const { summary } = getSummaryState(conversationId)
   const report = await compactBeforeRun({ baseUrl, apiKey, model, signal }, conversationId, tools, {
     force: false,
     summary,
     contextWindow,
-    workspace
+    workspace,
+    system: systemMessage
   })
   // 只有真调过模型才发事件:被计划拒绝时没有任何账目可展示
   if (report.usage) {
@@ -1048,12 +1104,9 @@ async function startRun(input: StartRunInput): Promise<void> {
   // 摘要 + 水位之后的原文:压缩生效后这才是发给模型的历史
   const messages = listMessagesAfterWatermark(conversationId)
   // id 与消息取自同一次转换:loop 中途压缩要把水位落在 id 上,两者必须一一对齐
-  const items = toIdentifiedMessages(messages, tools)
+  const items = toIdentifiedMessages(messages, tools, workspace)
   const current = getSummaryState(conversationId).summary
-  const history = [
-    systemPromptMessage(workspace, jail !== undefined, jail?.exec?.state === 'confined'),
-    ...historyBody(items, current)
-  ]
+  const history = [systemMessage, ...historyBody(items, current)]
 
   // 主 run 那一份钩子状态:派发规则与说明缓冲区都归 `hooks/set.ts`,这一层只负责把那次
   // run 的事实(范围、目录、边界、中止信号、本轮要回应的话)交给它。

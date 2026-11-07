@@ -5,7 +5,8 @@ import { skillRegistry } from '../skills/registry'
 import { replaceArguments } from '../skills/parser'
 import { agentRegistry } from '../agents/registry'
 import { store } from '../store'
-import { SYSTEM_PROMPT, workspaceNote } from './prompt'
+import type { ResolvedConnection } from '../store/providers'
+import { SYSTEM_PROMPT, modelNote, workspaceNote } from './prompt'
 import { summaryBlock } from './compact'
 import type { IdentifiedMessage } from './turns'
 
@@ -24,30 +25,36 @@ export const STALE_RESULT_PLACEHOLDER = '[历史调用,结果已省略]'
  * 主 Agent 与子 Agent 共用 —— 子 Agent 没有这份目录时,手里握着 load_skill
  * 却不知道合法名字,只能拿 navigation / route_planner 之类的词去猜,白烧步数。
  */
-export function skillsCatalog(): string {
-  const skills = skillRegistry.getEnabled()
-  if (skills.length === 0) return ''
-  const lines = skills.map((s) => `- ${s.name}: ${s.description}`)
-  return `\n\n## 可用 Skills\n以下是可按需加载的技能。当用户的任务与某项描述匹配时,先调用 load_skill 获取完整指令再行动。\n${lines.join('\n')}`
+export function skillsCatalog(workspace = ''): string {
+  const skills = skillRegistry.getEnabled(workspace)
+  // 0 条也要给出这一节:整段消失等于告诉模型「这个应用没有 skill 这层能力」,
+  // 而它手里明明有 load_skill;写明「0 个」才是事实。
+  if (skills.length === 0) {
+    return '\n\n## 可用 Skills\n本会话可用 Skills:0 个。'
+  }
+  const lines = skills.map((s) =>
+    s.scope === 'project' ? `- ${s.name}: ${s.description}(项目)` : `- ${s.name}: ${s.description}`
+  )
+  return `\n\n## 可用 Skills\n以下是可按需加载的技能,标「(项目)」的来自当前工作空间。当用户的任务与某项描述匹配时,先调用 load_skill 获取完整指令再行动。\n${lines.join('\n')}`
 }
 
 /**
  * 子 Agent 角色目录:只在允许派生时给出。
  * 内置通用角色不作为候选项列出(它是 agent 参数缺省时的默认角色)。
  */
-function agentsCatalog(): string {
+function agentsCatalog(workspace = ''): string {
   if (store.get('enableSubAgent') === false) return ''
-  const agents = agentRegistry.getEnabledCustom()
+  const agents = agentRegistry.getEnabledCustom(workspace)
   if (agents.length === 0) return ''
   const lines = agents.map((a) => `- ${a.name}: ${a.description}`)
   return `\n\n## 可用子 Agent\n用 task 工具派生时可通过 agent 参数指定以下角色,缺省则用通用子 Agent。\n${lines.join('\n')}`
 }
 
 /** 用户通过 / 触发的 skill:把正文与用户输入合并成本轮的 user 消息 */
-function expandUserSkill(m: Message): string {
+function expandUserSkill(m: Message, workspace = ''): string {
   if (!m.skill) return m.content
   try {
-    const body = skillRegistry.readBody(m.skill)
+    const body = skillRegistry.readBody(m.skill, workspace)
     return `[Skill: ${m.skill}]\n${replaceArguments(body, m.content)}`
   } catch (error) {
     // skill 已被删除或禁用:退化为普通消息,不中断对话
@@ -57,10 +64,10 @@ function expandUserSkill(m: Message): string {
 }
 
 /** 把单条库内消息转成发给模型的协议消息;空占位行返回 null */
-export function toChatMessage(m: Message): ChatCompletionMessage | null {
+export function toChatMessage(m: Message, workspace = ''): ChatCompletionMessage | null {
   switch (m.role) {
     case 'user':
-      return { role: 'user', content: expandUserSkill(m) }
+      return { role: 'user', content: expandUserSkill(m, workspace) }
     case 'system':
       return { role: 'system', content: m.content }
     case 'tool':
@@ -93,7 +100,8 @@ export function toChatMessage(m: Message): ChatCompletionMessage | null {
  */
 export function toIdentifiedMessages(
   messages: Message[],
-  definitions: ToolDefinition[]
+  definitions: ToolDefinition[],
+  workspace = ''
 ): IdentifiedMessage[] {
   // tool_call_id → 工具名,用于判断 tool 行对应的是哪个工具
   const callTools = new Map<string, string>()
@@ -102,7 +110,7 @@ export function toIdentifiedMessages(
     if (m.role === 'assistant') {
       for (const c of m.tool_calls) callTools.set(c.id, c.name)
     }
-    const converted = toChatMessage(m)
+    const converted = toChatMessage(m, workspace)
     if (!converted) continue
     if (converted.role === 'tool') {
       const toolName = callTools.get(m.tool_call_id)
@@ -117,7 +125,7 @@ export function toIdentifiedMessages(
 }
 
 /**
- * 主 Agent 的 system prompt(含工作空间说明与 skill / 子 Agent 目录)。
+ * 主 Agent 的 system prompt(含工作空间说明、本次模型说明与 skill / 子 Agent 目录)。
  * 单独导出是为了让「历史正文」与「这份开头」能由调用方自己拼,而不是多算一遍目录。
  *
  * workspace 排在这些目录之前:一个 run 的工作空间在 startRun 就固定,
@@ -125,19 +133,25 @@ export function toIdentifiedMessages(
  *
  * `confined` / `execConfined` 两个默认 false 是同一条守卫:接线漏了只会少说一句,
  * 不会谎报「有边界」。`buildHistory` 那条路(尺寸估算与退化路径)不传,理由见 prompt.ts。
+ *
+ * `connection` 是本次 run 解析出的那家服务商与那个模型,排在两个工作空间分支之后、
+ * 两份目录之前(前缀顺序按挥发性排,理由见 `modelNote`);`buildHistory` 同样不传 ——
+ * 那条路手里没有连接,而这一句缺了只是模型改用对自己的来历记忆作答,不会报错名字。
  */
 export function systemPromptMessage(
   workspace = '',
   confined = false,
-  execConfined = false
+  execConfined = false,
+  connection?: ResolvedConnection
 ): ChatCompletionMessage {
   return {
     role: 'system',
     content:
       SYSTEM_PROMPT +
       workspaceNote(workspace, confined, execConfined) +
-      skillsCatalog() +
-      agentsCatalog()
+      modelNote(connection) +
+      skillsCatalog(workspace) +
+      agentsCatalog(workspace)
   }
 }
 
@@ -161,6 +175,9 @@ export function historyBody(items: IdentifiedMessage[], summary = ''): ChatCompl
  * 历史里易变工具(volatile)的结果一律视为过期并替换为占位,
  * 模型想复用也没有数据可用,只能重新调用。本轮新产生的结果由 loop 直接追加,不经过这里。
  * definitions 是本次 run 的工具快照,用于判断哪个工具是易变的。
+ *
+ * 这条路的 system 不带边界与模型那两句,所以**不要拿它做尺寸估算** ——
+ * 压缩触发线要按真正发出去的那条看,用 `systemPromptMessage(...)` 的返回值。
  */
 export function buildHistory(
   messages: Message[],
@@ -170,6 +187,6 @@ export function buildHistory(
 ): ChatCompletionMessage[] {
   return [
     systemPromptMessage(workspace),
-    ...historyBody(toIdentifiedMessages(messages, definitions), summary)
+    ...historyBody(toIdentifiedMessages(messages, definitions, workspace), summary)
   ]
 }

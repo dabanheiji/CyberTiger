@@ -40,12 +40,18 @@ export interface FakeStore extends AgentStore {
   touched: string[]
 }
 
+export interface StoreOptions {
+  /** 返回 true 的 callId 在第一次写 tool 行时抛错,用来验异常收场 */
+  failToolMessageOnce?: (callId: string) => boolean
+}
+
 /** 记录落库操作的 AgentStore 实现,loop 的持久化分支全靠它断言 */
-export function makeStore(): FakeStore {
+export function makeStore(options: StoreOptions = {}): FakeStore {
   const steps = new Map<string, StoredStep>()
   const toolRows: FakeStore['toolRows'] = []
   const removedIds: string[] = []
   const touched: string[] = []
+  const failedOnce = new Set<string>()
   let seq = 0
 
   return {
@@ -67,6 +73,10 @@ export function makeStore(): FakeStore {
       removedIds.push(messageId)
     },
     addToolMessage: (scope: RunScope, toolCallId, content) => {
+      if (!failedOnce.has(toolCallId) && options.failToolMessageOnce?.(toolCallId)) {
+        failedOnce.add(toolCallId)
+        throw new Error(`写 tool 行失败:${toolCallId}`)
+      }
       const id = `tool-${++seq}`
       toolRows.push({ id, toolCallId, content, scope })
       return id
@@ -82,6 +92,8 @@ export interface TestTool {
   run: (args: Record<string, unknown>, context: ToolContext) => string
   /** 该工具的旧结果是否随时间失效(见 agent/history.ts) */
   volatile?: boolean
+  /** 本轮内同名同参是否复用结果(见 tools/types.ts);默认 false */
+  reuseInRun?: boolean
   executed: Array<{ args: string; callId: string }>
 }
 
@@ -91,6 +103,7 @@ function toDefinition(name: string, tool: TestTool): ToolDefinition {
     description: `测试工具 ${name}`,
     parameters: { type: 'object', properties: {} },
     volatile: tool.volatile,
+    reuseInRun: tool.reuseInRun,
     execute: (args, context) => {
       tool.executed.push({ args: JSON.stringify(args), callId: context.callId })
       return tool.run(args, context)
@@ -99,15 +112,19 @@ function toDefinition(name: string, tool: TestTool): ToolDefinition {
 }
 
 /** 造一个会记录调用次数的工具 */
-export function makeTool(result: string | ((args: Record<string, unknown>) => string)): TestTool {
+export function makeTool(
+  result: string | ((args: Record<string, unknown>) => string),
+  options: { reuseInRun?: boolean } = {}
+): TestTool {
   return {
     executed: [],
+    reuseInRun: options.reuseInRun,
     run: (args) => (typeof result === 'function' ? result(args) : result)
   }
 }
 
-export function makeVolatile(result: string): TestTool {
-  return { ...makeTool(result), volatile: true }
+export function makeVolatile(result: string, options: { reuseInRun?: boolean } = {}): TestTool {
+  return { ...makeTool(result, options), volatile: true }
 }
 
 /**

@@ -1,5 +1,6 @@
 import { AppSettings, store } from './index'
 import { applyThemeSource } from '../appearance'
+import { ensureProjectRoot } from '../project'
 import { engineProbe } from '../sandbox/preflight'
 import type { AppearanceSettings, SandboxExecStatus } from './types'
 
@@ -16,6 +17,8 @@ export function set(_e: any, key: keyof AppSettings, value: unknown) {
   // 外观的 mode 由主进程落到 nativeTheme,设了就会触发 updated,窗口底色与顶栏叠层自己跟上。
   // accent 不在这里管:它只改渲染层的令牌,主进程没有对应物。
   if (key === 'appearance') applyThemeSource((value as AppearanceSettings | undefined)?.mode)
+  // 草稿态选目录走的就是这一条(还没有会话行),脚手架同样在这里补上
+  if (key === 'defaultWorkspace' && typeof value === 'string') ensureProjectRoot(value)
 }
 
 export function remove(_e: any, key: keyof AppSettings) {

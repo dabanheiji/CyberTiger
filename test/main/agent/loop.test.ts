@@ -9,6 +9,7 @@ import {
 import { STEP_LIMIT_PROMPT } from '../../../src/main/agent/prompt'
 import { SUMMARY_BLOCK_PREFIX, isSummaryBlock, summaryBlock } from '../../../src/main/agent/compact'
 import type { ContextBudget } from '../../../src/main/agent/context'
+import type { RunHooks } from '../../../src/main/hooks/set'
 import { estimateRequestTokens } from '../../../src/main/tokens/estimate'
 import type { ChatCompletionMessage } from '../../../src/main/chat/llm'
 import type { ChatStreamEvent, RunScope } from '../../../src/main/chat/dto'
@@ -19,6 +20,7 @@ import {
   makeRunner,
   makeStore,
   makeTool,
+  makeVolatile,
   rootScope,
   subScope,
   type ModelStep,
@@ -42,6 +44,10 @@ interface RunOptions {
   workspace?: string
   /** 这次 run 跑在哪个服务商上;报表按它归集用量,空串即「未记录」 */
   providerId?: string
+  /** 换一个带注入的假 store,用于验落库失败时的收场 */
+  store?: ReturnType<typeof makeStore>
+  /** 每步都贴进请求的钩子说明;用于验固定开销把 pinned 算进去 */
+  notes?: string[]
 }
 
 interface RunOutcome {
@@ -53,7 +59,7 @@ interface RunOutcome {
 
 async function run(options: RunOptions = {}): Promise<RunOutcome> {
   const model = makeModel(options.script ?? [{ content: '回答完毕' }])
-  const store = makeStore()
+  const store = options.store ?? makeStore()
   const { emit, collected } = makeEmit()
   const result = await runAgent({
     scope: options.scope ?? rootScope(),
@@ -69,9 +75,21 @@ async function run(options: RunOptions = {}): Promise<RunOutcome> {
     ...(options.budget ? { budget: options.budget } : {}),
     ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
     ...(options.compaction ? { compaction: options.compaction } : {}),
+    ...(options.notes ? { hooks: notesHooks(options.notes) } : {}),
     stream: options.stream ?? model.stream
   })
   return { result, requests: model.requests, store, events: collected.events }
+}
+
+/** 只产说明、从不否决的钩子:固定开销那一项只需要 pinned 里有东西 */
+function notesHooks(notes: string[]): RunHooks {
+  return {
+    beforeAgent: () => Promise.resolve(),
+    beforeRequest: () => Promise.resolve({ history: null, notes: [] }),
+    afterRequest: () => Promise.resolve(),
+    afterAgent: () => Promise.resolve(),
+    takeNotes: () => [...notes]
+  }
 }
 
 /** 内容末条消息,锚定与循环控制都追加在这里 */
@@ -155,8 +173,12 @@ describe('runAgent 的基本循环', () => {
 })
 
 describe('本轮工具去重', () => {
+  // 去重只对白名单里的只读工具生效;测试里显式标上,才是在验证缓存本身
+  const reusable = (result: Parameters<typeof makeTool>[0]): TestTool =>
+    makeTool(result, { reuseInRun: true })
+
   it('同名同参只执行一次,第二次标记为复用', async () => {
-    const probe = makeTool('唯一结果')
+    const probe = reusable('唯一结果')
     const a = makeCall('probe', '{"q":"x"}')
     const b = makeCall('probe', '{"q":"x"}')
     const { store, events } = await run({
@@ -173,7 +195,7 @@ describe('本轮工具去重', () => {
   })
 
   it('参数只是键序不同也判为同一次调用', async () => {
-    const probe = makeTool('r')
+    const probe = reusable('r')
     await run({
       script: [
         {
@@ -187,7 +209,7 @@ describe('本轮工具去重', () => {
   })
 
   it('参数含空格与换行时按语义比较,不按原文', async () => {
-    const probe = makeTool('r')
+    const probe = reusable('r')
     await run({
       script: [
         { toolCalls: [makeCall('probe', '{ "a" : 1 }'), makeCall('probe', '{"a":1}')] },
@@ -199,7 +221,7 @@ describe('本轮工具去重', () => {
   })
 
   it('参数不是合法 JSON 时按原文比对,失败结果也被复用', async () => {
-    const probe = makeTool('r')
+    const probe = reusable('r')
     const { store, events } = await run({
       script: [
         { toolCalls: [makeCall('probe', '{坏', 'b1'), makeCall('probe', '{坏', 'b2')] },
@@ -214,7 +236,7 @@ describe('本轮工具去重', () => {
     const results = events.filter((e) => e.type === 'tool_result')
     expect(results.map((r) => ('reused' in r ? r.reused : undefined))).toEqual([false, true])
 
-    const probe2 = makeTool('r')
+    const probe2 = reusable('r')
     const second = await run({
       script: [
         { toolCalls: [makeCall('probe', '{坏', 'b3'), makeCall('probe', '{更坏', 'b4')] },
@@ -227,9 +249,9 @@ describe('本轮工具去重', () => {
     expect(secondResults.map((r) => ('reused' in r ? r.reused : undefined))).toEqual([false, false])
   })
 
-  it('参数是合法 JSON 但不是对象时退回原文比对', async () => {
-    // 数组/标量能过 JSON.parse,却进不了 toolKey 的排序分支,只能按原文比
-    const probe = makeTool('r')
+  it('参数是合法 JSON 但不是对象时同样按稳定序列化比对', async () => {
+    // 数组走 stableValue 的数组分支,保序;两张 [1] 是同一个 key
+    const probe = reusable('r')
     const { store, events } = await run({
       script: [
         { toolCalls: [makeCall('probe', '[1]', 'n1'), makeCall('probe', '[1]', 'n2')] },
@@ -251,15 +273,15 @@ describe('本轮工具去重', () => {
         { toolCalls: [makeCall('probe', '[1]', 'n3'), makeCall('probe', '[2]', 'n4')] },
         { content: 'ok' }
       ],
-      tools: { probe: makeTool('r') }
+      tools: { probe: reusable('r') }
     })
     // 原文不同就是两个 key,第二次不复用
     const secondResults = second.events.filter((e) => e.type === 'tool_result')
     expect(secondResults.map((r) => ('reused' in r ? r.reused : undefined))).toEqual([false, false])
   })
 
-  it('空参数与显式 {} 被判成两次调用(已知不一致)', async () => {
-    const probe = makeTool('r')
+  it('空参数与显式 {} 是同一次调用', async () => {
+    const probe = reusable('r')
     await run({
       script: [
         { toolCalls: [makeCall('probe', '   ', 'e1'), makeCall('probe', '{}', 'e2')] },
@@ -267,13 +289,24 @@ describe('本轮工具去重', () => {
       ],
       tools: { probe }
     })
-    // toolKey 对空参数短路成 "name|{}",而 "{}" 走排序分支得到 "name|[]",
-    // 于是同一个无参工具真跑了两次 —— 去重本意是要挡住这种调用。
-    expect(probe.executed.length).toBe(2)
+    // 递归序列化把空参数与 {} 都归成同一个空对象,不再短路出两种键
+    expect(probe.executed.length).toBe(1)
+  })
+
+  it('嵌套对象的键序不同也算同一次调用', async () => {
+    const probe = reusable('r')
+    const a = '{"outer":{"b":2,"a":1},"list":[1,2]}'
+    const b = '{"list":[1,2],"outer":{"a":1,"b":2}}'
+    await run({
+      script: [{ toolCalls: [makeCall('probe', a), makeCall('probe', b)] }, { content: 'ok' }],
+      tools: { probe }
+    })
+    // 数组保序、对象键排序,所以这两份参数的语义相同
+    expect(probe.executed.length).toBe(1)
   })
 
   it('同名不同参各执行一次', async () => {
-    const probe = makeTool('r')
+    const probe = reusable('r')
     await run({
       script: [
         { toolCalls: [makeCall('probe', '{"q":"a"}'), makeCall('probe', '{"q":"b"}')] },
@@ -284,8 +317,57 @@ describe('本轮工具去重', () => {
     expect(probe.executed.length).toBe(2)
   })
 
-  it('缓存不跨 run:新 run 会重新执行同样的调用', async () => {
+  it('没有标复用的工具每次都真正执行', async () => {
+    // 写文件、跑命令这类会改变本机的工具绝不能标 reuseInRun
     const probe = makeTool('r')
+    await run({
+      script: [
+        { toolCalls: [makeCall('probe', '{"q":"x"}'), makeCall('probe', '{"q":"x"}')] },
+        { content: 'ok' }
+      ],
+      tools: { probe }
+    })
+    expect(probe.executed.length).toBe(2)
+  })
+
+  it('volatile 工具即使标了复用也每次执行', async () => {
+    const probe = makeVolatile('r', { reuseInRun: true })
+    const { events } = await run({
+      script: [
+        { toolCalls: [makeCall('probe', '{}', 'v1'), makeCall('probe', '{}', 'v2')] },
+        { content: 'ok' }
+      ],
+      tools: { probe }
+    })
+    // 它的结果本身会随时间变化,缓存命中等于让模型拿着过期的时间往下做
+    expect(probe.executed.length).toBe(2)
+    const results = events.filter((e) => e.type === 'tool_result')
+    expect(results.map((r) => ('reused' in r ? r.reused : undefined))).toEqual([false, false])
+  })
+
+  it('副作用调用之后,之前缓存的只读结果作废', async () => {
+    const state = { content: '旧内容' }
+    const read = reusable(() => state.content)
+    const write = makeTool((args) => {
+      state.content = String(args.content)
+      return '已写入'
+    })
+    const { store } = await run({
+      script: [
+        { toolCalls: [makeCall('read', '{"path":"a.txt"}', 'r1')] },
+        { toolCalls: [makeCall('write', '{"path":"a.txt","content":"新内容"}', 'w1')] },
+        { toolCalls: [makeCall('read', '{"path":"a.txt"}', 'r2')] },
+        { content: 'ok' }
+      ],
+      tools: { read, write }
+    })
+    // 第一次读入缓存;写调用虽然不可复用,但它在执行前就清空了旧快照
+    expect(read.executed.length).toBe(2)
+    expect(store.toolRows.map((r) => r.content)).toEqual(['旧内容', '已写入', '新内容'])
+  })
+
+  it('缓存不跨 run:新 run 会重新执行同样的调用', async () => {
+    const probe = reusable('r')
     const call = makeCall('probe', '{}')
     const script: ModelStep[] = [{ toolCalls: [call] }, { content: 'ok' }]
     await run({ script: [...script], tools: { probe } })
@@ -502,6 +584,29 @@ describe('中止', () => {
     expect(store.toolRows.map((r) => r.toolCallId)).toEqual(['a1', 'z9'])
     expect(store.toolRows[1].content).toBe('[本轮未执行,无结果]')
     expect(probe.executed.length).toBe(1)
+  })
+})
+
+describe('落库失败时的收场', () => {
+  it('写 tool 行抛错时,这一轮仍给两个调用补齐响应,不留孤儿', async () => {
+    const store = makeStore({ failToolMessageOnce: (id) => id === 'c1' })
+    const probe = makeTool('真实结果')
+    const { result, events } = await run({
+      store,
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'c1'), makeCall('probe', '{"i":2}', 'c2')] },
+        { content: '不该走到这里' }
+      ],
+      tools: { probe }
+    })
+    // 原始故障不能被收场盖掉:用户该看到的是那次真正的写库失败
+    expect(result.error).toContain('写 tool 行失败')
+    // assistant 行带两个调用,两个都得有 tool 行:缺一个下一轮回放就 400
+    expect(store.toolRows.map((r) => r.toolCallId)).toEqual(['c1', 'c2'])
+    // c1 真的执行过:补行写它的真实结果,不能把发生过的事说成「未执行」
+    expect(store.toolRows[0].content).toBe('真实结果')
+    expect(store.toolRows[1].content).toBe('[本轮未执行,无结果]')
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(1)
   })
 })
 
@@ -839,6 +944,28 @@ describe('run 中途压缩', () => {
     expect(asksOriginal(requests[1].messages)).toBe(true)
   })
 
+  it('固定开销把本步的钩子说明算进去:说明越长,触发线越早', async () => {
+    const probe = makeTool('结果')
+    const plain = fakeCompactor([{ compacted: false }])
+    await run({
+      history: withHistory(),
+      script: [{ toolCalls: [makeCall('probe', '{"i":1}', 'n1')] }, { content: '结束' }],
+      tools: { probe },
+      compaction: { summary: '', historyIds: ['m1'], run: plain.run }
+    })
+    const noted = fakeCompactor([{ compacted: false }])
+    await run({
+      history: withHistory(),
+      script: [{ toolCalls: [makeCall('probe', '{"i":1}', 'n2')] }, { content: '结束' }],
+      tools: { probe },
+      notes: ['这条说明很长'.repeat(200)],
+      compaction: { summary: '', historyIds: ['m1'], run: noted.run }
+    })
+
+    // 漏掉 pinned 的话,钩子塞进来的几万字不占固定开销,压缩会晚一拍才触发
+    expect(noted.calls[0].sizing.fixedTokens).toBeGreaterThan(plain.calls[0].sizing.fixedTokens)
+  })
+
   it('便签写明「本轮目标、进度、已执行的工具与结论」:续跑不重做已做过的事', async () => {
     const probe = makeTool('{"iso":"2026-10-12T09:00:00Z"}')
     const fake = fakeCompactor([{ compacted: false }])
@@ -854,6 +981,26 @@ describe('run 中途压缩', () => {
     expect(note).toContain('第 1 步,最多 10 步')
     // 结论原文进便签:摘要里写下它,压完就不会再调一次同一个工具
     expect(note).toContain('probe({"from":"中牟"}) → 成功:{"iso":"2026-10-12T09:00:00Z"}')
+  })
+
+  it('便签跨步累计:第二次压缩仍写得出第 1 步做过的调用', async () => {
+    const probe = makeTool('结果')
+    const fake = fakeCompactor([{ compacted: false }, { compacted: false }])
+    await run({
+      history: withHistory(),
+      script: [
+        { toolCalls: [makeCall('probe', '{"i":1}', 'x1')] },
+        { toolCalls: [makeCall('probe', '{"i":2}', 'x2')] },
+        { content: '结束' }
+      ],
+      tools: { probe },
+      compaction: { summary: '', historyIds: ['m1'], run: fake.run }
+    })
+
+    expect(fake.calls).toHaveLength(2)
+    // 每步新建的话第二条便签只剩第 2 步,压完续跑会把第 1 步重做一遍
+    expect(fake.calls[1].note).toContain('probe({"i":1})')
+    expect(fake.calls[1].note).toContain('probe({"i":2})')
   })
 
   it('第二次压缩拿到上一份摘要:替换语义下前情靠它合并', async () => {

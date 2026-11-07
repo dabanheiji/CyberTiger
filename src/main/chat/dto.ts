@@ -131,11 +131,14 @@ export interface AskUserQuestion {
 }
 
 /**
- * 用户对一次提问的作答。
- * 数组里是选中的选项文本(自由输入的那条也放这里),空数组即「跳过,没给选择」;
- * null 表示压根没拿到答案 —— 本轮被中止,或提问在答案回来前就失效了。
+ * 一次提问的了结方式。
+ *
+ * `answered` 里是选中的选项文本(自由输入的那条也放这里),空数组即「跳过,没给选择」;
+ * `aborted` / `timeout` 都表示没拿到答案,但给模型的文案是两句不同的事实 ——
+ * 混成一句会让模型以为用户看过问题之后选了「不说」。
  */
-export type AskUserAnswer = string[] | null
+export type AskUserSettlement =
+  { kind: 'answered'; answers: string[] } | { kind: 'aborted' } | { kind: 'timeout' }
 
 /**
  * 回答一次提问。
@@ -202,6 +205,18 @@ export interface PendingApprovalDto extends ApprovalRequest {
 }
 
 /**
+ * `chat:pendingQuestions` 的一条:渲染层重载后靠它把还挂着的提问卡片填回来。
+ * 与审批同一套纪律 —— Cmd+R 之后事件全丢、流式状态归零,而主进程仍阻塞在那次调用上。
+ */
+export interface PendingQuestionDto {
+  questionId: string
+  conversationId: string
+  /** 收起卡片时按它认:同一次调用的 tool_result 到手即收 */
+  callId: string
+  question: AskUserQuestion
+}
+
+/**
  * 压缩被计划拒绝的原因(与 agent/compact.ts 的 `CompactReason` 同一支,字面量联合结构相同)。
  * 界面要据此解释「现在按了也省不出空间」,所以它不是错误,是一个需要展示的结论。
  */
@@ -251,7 +266,7 @@ export type ChatStreamEvent =
     }
   /**
    * 模型请用户在几个候选里做选择(`ask_user` 工具)。
-   * run 会阻塞在这次工具调用上,直到 `chat:answerQuestion` 把答案交回来,或本轮被中止。
+   * run 会阻塞在这次工具调用上,直到 `chat:answerQuestion` 把答案交回来、本轮被中止,或等满时限。
    * 带着 callId 是为了让渲染层在同一次调用的 tool_result 到手时收起卡片;
    * questionId 只是这一次提问的编号,回答案时凭它认领。
    */

@@ -12,8 +12,12 @@ import { SUMMARY_BLOCK_PREFIX, isSummaryBlock, summaryBlock } from '../../../src
 import {
   SUB_AGENT_SYSTEM_PROMPT,
   SYSTEM_PROMPT,
+  modelNote,
   workspaceNote
 } from '../../../src/main/agent/prompt'
+import { MAIN_AGENT_MAX_STEPS } from '../../../src/main/agent/loop'
+import { SUB_AGENT_MAX_STEPS, SUB_AGENT_RESULT_MAX } from '../../../src/main/agent/task'
+import { MAX_JOBS_PER_CONVERSATION, MAX_JOBS_TOTAL } from '../../../src/main/process/jobs'
 import { readFileTool, writeFileTool } from '../../../src/main/tools/files'
 import { runCommandTool } from '../../../src/main/tools/shell'
 import { skillRegistry } from '../../../src/main/skills/registry'
@@ -63,9 +67,13 @@ afterEach(() => {
 })
 
 describe('system prompt 里的目录注入', () => {
-  it('没有任何 skill 与自定义角色时只有基础提示词', () => {
+  it('没有任何 skill 与自定义角色时仍保留空目录:模型要知道 skill 这一层存在', () => {
     const history = buildHistory([], [])
-    expect(history).toEqual([{ role: 'system', content: SYSTEM_PROMPT }])
+    const system = history[0].content as string
+    expect(system.startsWith(SYSTEM_PROMPT)).toBe(true)
+    expect(system).toContain('## 可用 Skills')
+    expect(system).toContain('本会话可用 Skills:0 个')
+    expect(system).not.toContain('## 可用子 Agent')
   })
 
   it('启用的 skill 以 name: description 进入目录', () => {
@@ -87,6 +95,23 @@ describe('system prompt 里的目录注入', () => {
     skillRegistry.scan()
     expect(skillsCatalog()).toContain(skillNames[0])
     expect(skillsCatalog()).not.toContain(skillNames[1])
+  })
+
+  it('项目级 skill 也进目录:带工作空间时合并 .cybertiger/skills,同名覆盖全局', () => {
+    addSkill('shared', '全局那一份')
+    const ws = makeTempDir()
+    try {
+      writeFiles(ws, {
+        '.cybertiger/skills/shared/SKILL.md': skillDoc('shared', '项目那一份'),
+        '.cybertiger/skills/extra/SKILL.md': skillDoc('extra', '只在项目里')
+      })
+      const catalog = skillsCatalog(ws)
+      expect(catalog).toContain('- extra: 只在项目里(项目)')
+      expect(catalog).toContain('- shared: 项目那一份(项目)')
+      expect(catalog).not.toContain('全局那一份')
+    } finally {
+      removeTempDir(ws)
+    }
   })
 
   it('解析失败的 skill 不进目录,也不影响其他 skill', () => {
@@ -262,13 +287,219 @@ describe('system prompt 里的钩子说明', () => {
   })
 
   it('不随钩子数量、名称、sandboxed 变化:一句档位无关的常量才能保住 system 前缀', () => {
-    // 与审批那句同一条纪律 —— 分成两种措辞会让用户每装或每删一条钩子就打掉一次前缀
-    expect(SYSTEM_PROMPT).not.toMatch(/sandboxed|matcher|HOOK\.md|某条具体的钩子名/)
+    // 与审批那句同一条纪律 —— 分成两种措辞会让用户每装或每删一条钩子就打掉一次前缀。
+    // `HOOK.md` 不在禁用清单里:它是项目层那份固定布局的一部分,不随用户装了几条钩子变化
+    expect(SYSTEM_PROMPT).not.toMatch(/sandboxed|matcher|某条具体的钩子名/)
   })
 
   it('不提「消息可能被改写」:改写对模型是透明的,写明只会让它怀疑自己的上下文', () => {
     expect(SYSTEM_PROMPT).not.toContain('改写')
     expect(SUB_AGENT_SYSTEM_PROMPT).not.toContain('改写')
+  })
+})
+
+/** 讲自己运行机制那一段的标题:它必须留在 SYSTEM_PROMPT 常量里,而不是 workspaceNote */
+const SELF_SECTION_TITLE = '## 关于你自己的运行环境'
+
+/**
+ * 「关于你自己的运行环境」那一段单独取出来断言,理由与 hookSentence 同一条:
+ * 这一段只讲机制、一句祈使都不该有,而基础那十条规则里到处是「不要」(那是给模型的规矩),
+ * 整份 prompt 一起跑守卫只会一路误报。
+ */
+function selfSection(prompt: string): string {
+  expect(prompt).toContain(SELF_SECTION_TITLE)
+  return prompt.slice(prompt.indexOf(SELF_SECTION_TITLE))
+}
+
+describe('system prompt 里讲自己运行机制那一段', () => {
+  it('全局那份写明入口在用户那一侧:否则模型会去翻甚至去写那几处目录', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      const section = selfSection(prompt)
+      expect(section).toContain('由用户在本机配置')
+      expect(section).toContain('对所有会话生效')
+      // 「全局不可改」不等于「项目层不可改」:下一句紧跟着讲的就是可以经文件工具改的那一层
+      expect(section).toContain('没有给你修改这些配置的工具')
+      expect(section).toContain('.cybertiger')
+    }
+  })
+
+  it('全局与项目两层分开讲:混成一句「配置不可改」会与「文件工具能写 .cybertiger」自相矛盾', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      const section = selfSection(prompt)
+      expect(section).toContain('全局')
+      expect(section).toContain('项目级')
+    }
+    const main = selfSection(SYSTEM_PROMPT)
+    // 写出「谁可写」比只写「哪一层在哪」更关键:模型据此决定去写文件还是回报做不成
+    expect(main).toMatch(/read_file 与 write_file[^。]*读写它们/)
+    expect(main).toContain('下一次 run')
+  })
+
+  it('三类目录只给名字不给绝对路径:那几处是这套护栏自身,写出路径就是递一张靶子', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      const section = selfSection(prompt)
+      expect(section).toContain('skills / agents / hooks')
+      expect(section).not.toMatch(/Library\/Application|AppData|\/Users\/|C:\\Users/)
+    }
+  })
+
+  it('写明项目级那一层:目录名、四类配置、同名覆盖与生效时机', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      const section = selfSection(prompt)
+      expect(section).toContain('.cybertiger')
+      expect(section).toContain('同名条目覆盖全局那一份')
+    }
+    const main = selfSection(SYSTEM_PROMPT)
+    expect(main).toContain('SKILL.md')
+    expect(main).toContain('AGENT.md')
+    expect(main).toContain('HOOK.md')
+    expect(main).toContain('mcp.json')
+    expect(main).toContain('自动建出来')
+    expect(main).toContain('普通文件')
+    expect(main).toContain('下一次 run')
+  })
+
+  it('主 Agent 知道项目配置可以经 write_file 改,子 Agent 也知道自己那份白名单里可能没有它', () => {
+    // 这一句是「通过用户对话改自己的 skill / mcp」那条需求的落点:没有它模型会
+    // 把「改配置」归到应用设置页那一侧,而不是去写工作空间里的文件
+    expect(selfSection(SYSTEM_PROMPT)).toContain('write_file')
+    expect(selfSection(SUB_AGENT_SYSTEM_PROMPT)).toContain('write_file')
+    expect(selfSection(SUB_AGENT_SYSTEM_PROMPT)).toContain('工具白名单')
+  })
+
+  it('预算、去重、中止都归因成机制而不是故障:摘要块与「第二次拿到旧结果」不能读成自己丢了什么', () => {
+    const main = selfSection(SYSTEM_PROMPT)
+    expect(main).toContain('一段摘要替代')
+    // 「已复用」是界面上的说法,模型的上下文里没有这两个字,所以提示词讲的是「拿回第一次那份结果」
+    expect(main).toContain('只真正执行一次')
+    // 去重只在只读工具上:副作用工具每次都真正执行,且执行后旧快照作废
+    expect(main).toContain('每次都真正执行')
+    expect(main).not.toContain('已复用')
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      expect(selfSection(prompt)).toContain('机制在运行')
+      expect(selfSection(prompt)).toContain('中止')
+    }
+  })
+
+  it('这一段不含祈使:模型会把「请别动配置」当成本轮待办,与时间工具踩过的那一条同源', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      expect(selfSection(prompt)).not.toMatch(/请|务必|必须|应该|记得|不要|改用|换用/)
+    }
+  })
+
+  it('这一段是常量:档位名、引擎、装了哪几条钩子都不提,否则用户每动一个设置就重打一次前缀', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      expect(selfSection(prompt)).not.toMatch(
+        /询问审批|自动审批|完全访问|受限执行|sandbox-exec|bwrap|sandboxed|matcher/
+      )
+    }
+  })
+
+  it('进 SYSTEM_PROMPT 而不是 workspaceNote:后者换目录就要重打前缀,而这一段与目录无关', () => {
+    expect(workspaceNote('/ws', true, true)).not.toContain(SELF_SECTION_TITLE)
+    expect(systemPromptMessage('/ws').content).toContain(SELF_SECTION_TITLE)
+  })
+})
+
+/**
+ * 说明书里那几个数字必须与代码常量同源:改了上限却忘了改提示词,模型就会按旧数字
+ * 规划下一步(「还有 10 步」而实际只剩 6 步),而那是从行为上最难反推的一类漂移。
+ * 与 `LIST_ENTRY_SHAPES` 那两份同值复制同一条纪律:两处各写一份,由测试钉住相等。
+ */
+describe('自己那份说明书里的数字与代码常量同源', () => {
+  it('步数上限、子 Agent 结论上限、后台作业上限逐条对上', () => {
+    expect(selfSection(SYSTEM_PROMPT)).toContain(`${MAIN_AGENT_MAX_STEPS} 步`)
+    // 步数上限之后还有一次不带工具的收尾:只写「10 步」会让模型以为到顶就没有下一次调用
+    expect(selfSection(SYSTEM_PROMPT)).toContain('到顶之后还有一次收尾')
+    expect(selfSection(SYSTEM_PROMPT)).toContain('不带工具')
+    expect(selfSection(SYSTEM_PROMPT)).toContain(`${SUB_AGENT_MAX_STEPS} 步`)
+    expect(selfSection(SUB_AGENT_SYSTEM_PROMPT)).toContain(`${SUB_AGENT_MAX_STEPS} 步`)
+    // 结论上限在常量里是字符数,提示词写成 KB:8192 字符 = 8 KB
+    expect(SUB_AGENT_RESULT_MAX).toBe(8 * 1024)
+    expect(selfSection(SYSTEM_PROMPT)).toContain('8 KB')
+    expect(selfSection(SYSTEM_PROMPT)).toContain(`${MAX_JOBS_PER_CONVERSATION} 个`)
+    expect(selfSection(SYSTEM_PROMPT)).toContain(`${MAX_JOBS_TOTAL} 个`)
+  })
+
+  it('说明书列出的内置工具与注册表一致:名字对不上时模型会去调一个不存在的工具', async () => {
+    const { builtinTools } = await import('../../../src/main/tools/registry')
+    const section = selfSection(SYSTEM_PROMPT)
+    // 前六个在 builtinTools 里;后三个按 run 现构造,不在那份注册表里
+    const expected = [
+      'get_current_time',
+      'load_skill',
+      'read_skill_file',
+      'read_file',
+      'write_file',
+      'run_command',
+      'ask_user',
+      'background_job',
+      'task'
+    ]
+    for (const name of expected) expect(section).toContain(name)
+    // 注册表新增一个工具却没改这里时,这一条跟着红 —— 清单与真实能力是同一个集合
+    for (const tool of builtinTools) expect(expected).toContain(tool.name)
+  })
+})
+
+/**
+ * 「这次用的是哪家服务商的哪个模型」那一句。
+ * 它存在的理由不是给模型添料:用户问「你在用什么模型」时,模型答的是训练时那一个
+ * (本地 qwen 说自己是 ChatGPT 是常态),而本机唯一记录了这次真发了哪个名字的地方在这里。
+ */
+describe('system prompt 里的本次模型说明', () => {
+  const conn = {
+    providerName: '本地 Ollama',
+    model: 'qwen3.5:4b',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    apiKey: 'sk-local-secret',
+    contextWindow: 32768
+  }
+
+  it('服务商与模型两个名字都写出来,用户问起时这一句就是答案', () => {
+    const note = modelNote(conn)
+    expect(note).toContain('## 本次执行使用的模型')
+    expect(note).toContain('服务商:本地 Ollama')
+    expect(note).toContain('模型:qwen3.5:4b')
+    // 光给名字不够:小模型对自己的来历记忆是训练时那一个,不点破它会继续报那个
+    expect(note).toContain('不是同一件事')
+  })
+
+  it('只写那两个名字,不带上 baseUrl 与 apiKey:这一句每步随 system 发给模型', () => {
+    // resolveConnection 的整份连接里还有凭据;抄多了就是把密钥写进对话
+    expect(modelNote(conn)).not.toContain('http://127.0.0.1:11434')
+    expect(modelNote(conn)).not.toContain('sk-local-secret')
+  })
+
+  it('缺连接、缺任一字段或全是空白时整段不出现:接线漏了只会少说一句,不会报一个没解析出来的名字', () => {
+    expect(modelNote(undefined)).toBe('')
+    expect(modelNote({ providerName: '', model: 'qwen' })).toBe('')
+    expect(modelNote({ providerName: 'Ollama', model: '   ' })).toBe('')
+    expect(systemPromptMessage('/ws').content).not.toContain('## 本次执行使用的模型')
+  })
+
+  it('这一段是每次 run 现算的,不进两段常量:写进常量等于每次报同一个假名字', () => {
+    for (const prompt of [SYSTEM_PROMPT, SUB_AGENT_SYSTEM_PROMPT]) {
+      expect(prompt).not.toContain('## 本次执行使用的模型')
+      expect(prompt).not.toContain('服务商:')
+    }
+  })
+
+  it('排在边界那一句之后、两份目录之前:前缀按挥发性排,换模型不该重打工作空间那一节', () => {
+    addSkill(skillNames[0], '规划路线')
+    const content = systemPromptMessage('/ws', false, false, conn).content as string
+    expect(content.indexOf('## 本次会话的工作空间')).toBeLessThan(
+      content.indexOf('## 本次执行使用的模型')
+    )
+    expect(content.indexOf('## 本次执行使用的模型')).toBeLessThan(content.indexOf('## 可用 Skills'))
+  })
+
+  it('buildHistory 那条路不带它:尺寸估算手里没有连接,与 confined 同一条保守方向', () => {
+    expect(buildHistory([], [], '', '/ws')[0].content).not.toContain('## 本次执行使用的模型')
+  })
+
+  it('那句不含祈使:模型会把「请以此为准」当成本轮待办,与时间工具踩过的那一条同源', () => {
+    expect(modelNote(conn)).not.toMatch(/请|务必|必须|应该|记得|不要|改用|换用/)
   })
 })
 

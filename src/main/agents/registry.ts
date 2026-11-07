@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
 import { store } from '../store'
+import { mergeByName, projectAgents } from '../project'
 import { BUILTIN_AGENTS, GENERIC_AGENT } from './builtin'
 import { buildAgentFile, parseAgentFile } from './parser'
 import type { AgentDraft, AgentMeta } from './types'
@@ -116,18 +117,30 @@ class AgentRegistry {
     return this.agents
   }
 
-  /** 只取启用中的自定义角色,供 system prompt 注入目录 */
-  getEnabledCustom(): AgentMeta[] {
-    return this.agents.filter((a) => !a.builtin && a.enabled && !a.error)
+  /** 只取启用中的自定义角色;传了工作空间就叠上 `.cybertiger/agents`,同名覆盖全局 */
+  getEnabledCustom(workspace = ''): AgentMeta[] {
+    const global = this.agents.filter((a) => !a.builtin && a.enabled && !a.error)
+    if (!workspace.trim()) return global
+    const disabled = new Set(store.get('disabledAgents') ?? [])
+    return mergeByName(
+      global,
+      projectAgents(workspace, disabled).filter((a) => a.enabled && !a.error)
+    )
   }
 
-  get(name: string): AgentMeta | undefined {
+  /** 按名字找;项目级同名角色优先(与目录注入的覆盖方向一致) */
+  get(name: string, workspace = ''): AgentMeta | undefined {
+    if (workspace.trim()) {
+      const disabled = new Set(store.get('disabledAgents') ?? [])
+      const project = projectAgents(workspace, disabled).find((a) => a.name === name)
+      if (project) return project
+    }
     return this.agents.find((a) => a.name === name)
   }
 
   /** 解析 task 工具的 agent 参数;空串表示内置通用角色 */
-  resolve(name: string): AgentMeta | undefined {
-    return name === '' ? GENERIC_AGENT : this.get(name)
+  resolve(name: string, workspace = ''): AgentMeta | undefined {
+    return name === '' ? GENERIC_AGENT : this.get(name, workspace)
   }
 
   /** 重扫目录并广播;create / update / remove 等直接改动目录的路径必须走这里 */

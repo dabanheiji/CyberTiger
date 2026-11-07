@@ -39,8 +39,15 @@ export function initSkills(): void {
   })
 }
 
-export function list(): IpcResult<{ skills: SkillMeta[] }> {
-  return run(() => ({ skills: skillRegistry.list() }))
+/**
+ * 列表接口。传了工作空间就把该项目的 `.cybertiger/skills` 合进来 ——
+ * 聊天页敲 `/` 时用它,而设置页不传,仍只认全局那一层。
+ */
+export function list(
+  _e: IpcMainInvokeEvent,
+  workspace?: string
+): IpcResult<{ skills: SkillMeta[] }> {
+  return run(() => ({ skills: skillRegistry.list(workspace) }))
 }
 
 export function setEnabled(
@@ -62,7 +69,10 @@ export function openDir(): Promise<IpcResult<null>> {
   })
 }
 
-export function discover(_e: IpcMainInvokeEvent, input: string): Promise<IpcResult<DiscoverResult>> {
+export function discover(
+  _e: IpcMainInvokeEvent,
+  input: string
+): Promise<IpcResult<DiscoverResult>> {
   return runAsync(() => discoverRemote(input))
 }
 
@@ -75,7 +85,9 @@ export function importLocal(e: IpcMainInvokeEvent): Promise<IpcResult<DiscoverRe
       properties: ['openFile', 'openDirectory'],
       filters: [{ name: 'Zip 或文件夹', extensions: ['zip'] }]
     }
-    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    const result = win
+      ? await dialog.showOpenDialog(win, options)
+      : await dialog.showOpenDialog(options)
     if (result.canceled || result.filePaths.length === 0) return null
     return discoverLocal(result.filePaths[0])
   })

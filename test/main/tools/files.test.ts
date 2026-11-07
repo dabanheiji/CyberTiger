@@ -67,6 +67,15 @@ describe('read_file', () => {
     expect(res.result).toContain('二进制文件')
   })
 
+  it('NUL 出现在 8 KB 之后仍判为二进制:前一段全是可打印字节不代表整份是文本', async () => {
+    const head = Buffer.alloc(9_000, 0x41)
+    head[head.length - 1] = 0x00
+    fs.writeFileSync(file('late-nul.dat'), head)
+    const res = await read({ path: file('late-nul.dat') })
+    expect(res.ok).toBe(false)
+    expect(res.result).toContain('二进制文件')
+  })
+
   it('空文件明确说空,而不是返回一段只有分隔符的正文', async () => {
     fs.writeFileSync(file('empty.txt'), '', 'utf8')
     const res = await read({ path: file('empty.txt') })

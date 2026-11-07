@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
 import { store } from '../store'
+import { mergeByName, projectHooks } from '../project'
 import type { SandboxExecStatus, SandboxSettings } from '../store/types'
 import { resolveHookCommand } from './contract'
 import { buildHookFile, parseHookFile } from './parser'
@@ -203,14 +204,22 @@ class HookRegistry {
 
   /**
    * 启用的、解析成功的钩子;`event` 传了只取那一个时机。
+   * 传了工作空间就叠上该项目的 `.cybertiger/hooks`,同名条目覆盖全局那一份。
    *
    * 一次 run 只在开头取一次快照(与审批名单同一条纪律):跑到一半改钩子时,
    * 已发出的那些调用按哪份算说不清。
    */
-  getEnabled(event?: HookEvent): HookMeta[] {
-    return this.hooks.filter(
-      (h) => h.enabled && !h.error && (event === undefined || h.event === event)
+  getEnabled(event?: HookEvent, workspace = ''): HookMeta[] {
+    const enabled = (h: HookMeta): boolean =>
+      h.enabled && !h.error && (event === undefined || h.event === event)
+    if (!workspace.trim()) return this.hooks.filter(enabled)
+    const disabled = new Set(store.get('disabledHooks') ?? [])
+    // 先合并再按事件过滤:项目里同名但换了事件的钩子才算覆盖,否则一条都命中不了
+    const merged = mergeByName(
+      this.hooks.filter((h) => h.enabled && !h.error),
+      projectHooks(workspace, disabled).filter((h) => h.enabled && !h.error)
     )
+    return merged.filter((h) => event === undefined || h.event === event)
   }
 
   /** 重扫目录并广播;任何直接改动目录的路径都必须走这里 */

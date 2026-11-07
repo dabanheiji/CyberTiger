@@ -65,6 +65,21 @@ const WRITE_FILE = 'write_file'
 const RUN_COMMAND = 'run_command'
 const BACKGROUND_JOB = 'background_job'
 
+/**
+ * 明确不在审批面内的内置工具。这份名单是白名单而不是兜底:没登记的工具一律进面。
+ *
+ * - 前三个不碰本机状态;
+ * - `ask_user` 本来就停在用户身上(那张卡片就是它);
+ * - `task` 不直接动手,它派出的子 run 里每一次调用各自过闸门。
+ */
+const OUT_OF_SURFACE = new Set([
+  'get_current_time',
+  'load_skill',
+  'read_skill_file',
+  'ask_user',
+  'task'
+])
+
 function stringArg(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
@@ -272,17 +287,27 @@ function describe(query: ApprovalQuery): Operation {
     }
   }
 
-  // 其余内置工具(get_current_time / load_skill / read_skill_file / ask_user / task)不在审批面内:
-  // 前三者不碰本机状态,ask_user 本来就停在用户身上,task 不直接动手、
-  // 它派出的子 run 里每一次工具调用各自过闸门。
+  if (OUT_OF_SURFACE.has(toolName)) {
+    return {
+      summary: `调用工具:${toolName}`,
+      detail: fromSubAgent,
+      risk: 'low',
+      // 面外的工具不会走到「放行一整类」那一步,键只是把形状补齐
+      runAllowKey: toolName,
+      inSurface: false,
+      autoAllowed: true
+    }
+  }
+
+  // 没登记的内置工具:没人说过它碰不碰本机,就按最保守的那一档问一次。
+  // 这里不做 fail-open —— 漏登记一个新工具,代价是多问一次,而不是它悄悄跑了。
   return {
     summary: `调用工具:${toolName}`,
-    detail: fromSubAgent,
-    risk: 'low',
-    // 面外的工具不会走到「放行一整类」那一步,键只是把形状补齐
+    detail: [...fromSubAgent, '未登记的内置工具,按审批处理'],
+    risk: 'elevated',
     runAllowKey: toolName,
-    inSurface: false,
-    autoAllowed: true
+    inSurface: true,
+    autoAllowed: false
   }
 }
 

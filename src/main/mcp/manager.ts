@@ -1,9 +1,13 @@
 import os from 'os'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
+import {
+  StdioClientTransport,
+  getDefaultEnvironment
+} from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { augmentPath } from '../sandbox/env'
+import { readProjectMcp } from '../project'
 import type { ToolDefinition } from '../tools/types'
 import type { McpConfig, McpServerConfig, McpServerStatus, McpToolInfo } from './types'
 
@@ -17,6 +21,10 @@ interface RemoteTool {
 }
 
 interface ServerEntry {
+  /** server 名;与 scope 一起构成 Map 的键 */
+  name: string
+  /** '' 为全局(设置页那一份),其余是工作空间的 `.cybertiger/mcp.json` */
+  scope: string
   config: McpServerConfig
   configKey: string
   state: McpServerStatus['state']
@@ -24,12 +32,6 @@ interface ServerEntry {
   client: Client | null
   transport: Transport | null
   tools: RemoteTool[]
-}
-
-/** 暴露给模型的工具名 → 来源 */
-interface ToolSource {
-  server: string
-  tool: string
 }
 
 /**
@@ -50,7 +52,9 @@ function sanitizeToolName(server: string, tool: string): string {
 
 /** 把 callTool 返回的内容块拼成给模型看的文本 */
 function contentToText(content: unknown): string {
-  if (!Array.isArray(content)) return typeof content === 'string' ? content : JSON.stringify(content)
+  if (!Array.isArray(content)) {
+    return typeof content === 'string' ? content : JSON.stringify(content)
+  }
   return content
     .map((block: { type?: string; text?: string; mimeType?: string }) => {
       if (block.type === 'text') return block.text ?? ''
@@ -62,10 +66,16 @@ function contentToText(content: unknown): string {
     .join('\n')
 }
 
+/**
+ * MCP 连接的生命周期。
+ *
+ * 全局那一份归设置页管;工作空间那一份来自 `<workspace>/.cybertiger/mcp.json`,
+ * 同名 server(以及它提供的同名工具)覆盖全局。同一个 server 名在两个作用域里各开一条连接,
+ * 但工具查找按「先全局、后项目」的顺序覆盖 —— 所以项目里的那份赢。
+ */
 class McpManager {
+  /** 键是 `scope\0name`;两个作用域可以各有同名 server */
   private servers = new Map<string, ServerEntry>()
-  /** 清洗后的工具名 → 来源,供 execute 反查 */
-  private toolSources = new Map<string, ToolSource>()
   private listeners = new Set<(statuses: McpServerStatus[]) => void>()
 
   onStatusChange(listener: (statuses: McpServerStatus[]) => void): () => void {
@@ -80,34 +90,75 @@ class McpManager {
     for (const l of this.listeners) l(statuses)
   }
 
+  private key(scope: string, name: string): string {
+    return `${scope}\u0000${name}`
+  }
+
+  /** 设置页只看全局那一份;项目级状态不进它的列表 */
   getStatus(): McpServerStatus[] {
-    return [...this.servers.entries()].map(([name, s]) => ({
-      name,
-      state: s.state,
-      error: s.error,
-      tools: s.tools.map((t): McpToolInfo => ({ name: t.name, description: t.description }))
-    }))
+    const statuses: McpServerStatus[] = []
+    for (const entry of this.servers.values()) {
+      if (entry.scope !== '') continue
+      statuses.push({
+        name: entry.name,
+        state: entry.state,
+        error: entry.error,
+        tools: entry.tools.map((t): McpToolInfo => ({ name: t.name, description: t.description }))
+      })
+    }
+    return statuses
   }
 
   /**
-   * 按新配置增量重连:未变的保留,删除或变更的关闭,新增或变更且未禁用的异步连接。
+   * 按新配置增量重连全局 server:未变的保留,删除或变更的关闭,新增或变更且未禁用的异步连接。
    * 返回时连接可能仍在进行,状态通过 onStatusChange 推送。
    */
   async reload(config: McpConfig): Promise<void> {
-    const next = config.mcpServers
+    await this.reloadScope('', config.mcpServers)
+  }
+
+  /**
+   * 读工作空间的 `.cybertiger/mcp.json` 并同步那一层连接。
+   * 每次进入工作空间、以及每次 run 开始时调用;文件没变时这条路径什么都不做。
+   */
+  async ensureWorkspace(workspace: string): Promise<void> {
+    const scope = workspace.trim()
+    if (!scope) return
+    const { config, error } = readProjectMcp(scope)
+    if (error) console.error('[mcp] 项目配置被忽略:', error)
+    await this.reloadScope(scope, config?.mcpServers ?? {})
+  }
+
+  /** 关闭某个工作空间的项目连接(会话换目录且没有别处用到时由调用方决定是否用) */
+  async closeWorkspace(workspace: string): Promise<void> {
+    const scope = workspace.trim()
+    if (!scope) return
+    await Promise.all(
+      [...this.servers.entries()]
+        .filter(([, entry]) => entry.scope === scope)
+        .map(([key]) => this.closeServer(key))
+    )
+    this.notify()
+  }
+
+  private async reloadScope(scope: string, next: Record<string, McpServerConfig>): Promise<void> {
     const closing: Promise<void>[] = []
 
-    for (const [name, entry] of this.servers) {
-      const nextConfig = next[name]
+    for (const [key, entry] of this.servers) {
+      if (entry.scope !== scope) continue
+      const nextConfig = next[entry.name]
       if (!nextConfig || JSON.stringify(nextConfig) !== entry.configKey) {
-        closing.push(this.closeServer(name))
+        closing.push(this.closeServer(key))
       }
     }
     await Promise.all(closing)
 
     for (const [name, serverConfig] of Object.entries(next)) {
-      if (this.servers.has(name)) continue
+      const key = this.key(scope, name)
+      if (this.servers.has(key)) continue
       const entry: ServerEntry = {
+        name,
+        scope,
         config: serverConfig,
         configKey: JSON.stringify(serverConfig),
         state: serverConfig.disabled ? 'disabled' : 'connecting',
@@ -115,19 +166,20 @@ class McpManager {
         transport: null,
         tools: []
       }
-      this.servers.set(name, entry)
-      if (!serverConfig.disabled) void this.connect(name, entry)
+      this.servers.set(key, entry)
+      if (!serverConfig.disabled) void this.connect(key, entry)
     }
     this.notify()
   }
 
-  /** 用当前配置强制重连全部 server */
+  /** 用当前配置强制重连全部全局 server */
   async reconnectAll(config: McpConfig): Promise<void> {
     await this.closeAll()
     await this.reload(config)
   }
 
-  private async connect(name: string, entry: ServerEntry): Promise<void> {
+  private async connect(key: string, entry: ServerEntry): Promise<void> {
+    const label = entry.scope ? `${entry.scope}/${entry.name}` : entry.name
     try {
       const transport = this.createTransport(entry.config)
       const client = new Client(CLIENT_INFO)
@@ -136,7 +188,7 @@ class McpManager {
       await client.connect(transport)
       const { tools } = await client.listTools()
       // 连接期间该 server 可能已被 reload 移除或替换
-      if (this.servers.get(name) !== entry) {
+      if (this.servers.get(key) !== entry) {
         await client.close().catch(() => undefined)
         return
       }
@@ -147,16 +199,15 @@ class McpManager {
       }))
       entry.state = 'connected'
       entry.error = undefined
-      this.rebuildToolIndex()
     } catch (error) {
-      if (this.servers.get(name) !== entry) return
+      if (this.servers.get(key) !== entry) return
       entry.state = 'error'
       entry.error = error instanceof Error ? error.message : String(error)
       entry.tools = []
       await entry.client?.close().catch(() => undefined)
       entry.client = null
       entry.transport = null
-      console.error(`[mcp] ${name} 连接失败:`, entry.error)
+      console.error(`[mcp] ${label} 连接失败:`, entry.error)
     }
     this.notify()
   }
@@ -179,56 +230,57 @@ class McpManager {
     })
   }
 
-  private async closeServer(name: string): Promise<void> {
-    const entry = this.servers.get(name)
+  private async closeServer(key: string): Promise<void> {
+    const entry = this.servers.get(key)
     if (!entry) return
-    this.servers.delete(name)
+    this.servers.delete(key)
     await entry.client?.close().catch((error) => {
-      console.error(`[mcp] ${name} 关闭失败:`, error)
+      console.error(`[mcp] ${entry.name} 关闭失败:`, error)
     })
-    this.rebuildToolIndex()
   }
 
   async closeAll(): Promise<void> {
-    await Promise.all([...this.servers.keys()].map((name) => this.closeServer(name)))
+    await Promise.all([...this.servers.keys()].map((key) => this.closeServer(key)))
     this.notify()
   }
 
-  private rebuildToolIndex(): void {
-    this.toolSources.clear()
-    for (const [server, entry] of this.servers) {
+  /**
+   * 把已连接 server 的工具映射为内置工具定义,供注册表合并。
+   * 传了工作空间就叠上该作用域的工具,同名工具由项目那一份覆盖。
+   */
+  getTools(scope = ''): ToolDefinition[] {
+    const byName = new Map<string, ToolDefinition>()
+    const add = (entry: ServerEntry): void => {
+      if (entry.state !== 'connected' || !entry.client) return
       for (const t of entry.tools) {
-        this.toolSources.set(sanitizeToolName(server, t.name), { server, tool: t.name })
-      }
-    }
-  }
-
-  /** 把已连接 server 的工具映射为内置工具定义,供注册表合并 */
-  getTools(): ToolDefinition[] {
-    const defs: ToolDefinition[] = []
-    for (const [server, entry] of this.servers) {
-      if (entry.state !== 'connected' || !entry.client) continue
-      for (const t of entry.tools) {
-        const name = sanitizeToolName(server, t.name)
-        defs.push({
+        const name = sanitizeToolName(entry.name, t.name)
+        byName.set(name, {
           name,
-          description: t.description ? `[${server}] ${t.description}` : `[${server}] ${t.name}`,
+          description: t.description
+            ? `[${entry.name}] ${t.description}`
+            : `[${entry.name}] ${t.name}`,
           parameters: t.inputSchema,
-          execute: (args) => this.callTool(name, args)
+          execute: (args) => this.callTool(entry, t.name, args)
         })
       }
     }
-    return defs
+    for (const entry of this.servers.values()) if (entry.scope === '') add(entry)
+    const trimmed = scope.trim()
+    if (trimmed) {
+      for (const entry of this.servers.values()) if (entry.scope === trimmed) add(entry)
+    }
+    return [...byName.values()]
   }
 
-  private async callTool(name: string, args: Record<string, unknown>): Promise<string> {
-    const source = this.toolSources.get(name)
-    if (!source) throw new Error(`工具 ${name} 已不可用`)
-    const entry = this.servers.get(source.server)
-    if (!entry?.client || entry.state !== 'connected') {
-      throw new Error(`MCP server ${source.server} 未连接`)
+  private async callTool(
+    entry: ServerEntry,
+    tool: string,
+    args: Record<string, unknown>
+  ): Promise<string> {
+    if (!entry.client || entry.state !== 'connected') {
+      throw new Error(`MCP server ${entry.name} 未连接`)
     }
-    const result = await entry.client.callTool({ name: source.tool, arguments: args })
+    const result = await entry.client.callTool({ name: tool, arguments: args })
     // SDK 返回类型兼容旧协议:新协议是 content 数组,旧协议是 toolResult
     const payload = 'content' in result ? result.content : result.toolResult
     const text = contentToText(payload)

@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
 import { store } from '../store'
+import { mergeByName, projectSkills } from '../project'
 import { parseSkillFile } from './parser'
 import type { SkillMeta, SkillSource } from './types'
 
@@ -12,9 +13,34 @@ export const SOURCE_FILE = '.cybertiger.json'
 /** read_skill_file 允许的最大文件 */
 const MAX_FILE_BYTES = 200 * 1024
 const TEXT_EXTENSIONS = new Set([
-  '.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv', '.xml', '.html', '.css',
-  '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.sh', '.rb', '.go', '.rs',
-  '.java', '.kt', '.sql', '.ini', '.cfg', '.env.example', ''
+  '.md',
+  '.txt',
+  '.json',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.csv',
+  '.xml',
+  '.html',
+  '.css',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.tsx',
+  '.jsx',
+  '.py',
+  '.sh',
+  '.rb',
+  '.go',
+  '.rs',
+  '.java',
+  '.kt',
+  '.sql',
+  '.ini',
+  '.cfg',
+  '.env.example',
+  ''
 ])
 
 export function skillsDir(): string {
@@ -125,8 +151,22 @@ class SkillRegistry {
     this.skills = result
   }
 
-  list(): SkillMeta[] {
-    return this.skills
+  /**
+   * 全量列表(含被禁用与解析失败的条目)。
+   *
+   * 不传工作空间时只认全局那一层 —— 设置页的启停 / 卸载都落在那份文件上,
+   * 把项目条目混进去会给出一个按不动的开关。传了工作空间就把 `.cybertiger/skills`
+   * 合进来,同名由项目那一条覆盖,并给每条打上 `scope: 'project'`;
+   * 解析失败的项目条目也留着(带 `error`),否则界面上看不见「这里有一条坏了」。
+   */
+  list(workspace = ''): SkillMeta[] {
+    if (!workspace.trim()) return this.skills
+    const disabled = new Set(store.get('disabledSkills') ?? [])
+    const project: SkillMeta[] = projectSkills(workspace, disabled).map((s) => ({
+      ...s,
+      scope: 'project'
+    }))
+    return mergeByName(this.skills, project)
   }
 
   /** 重扫目录并广播变更;install / uninstall 等直接改动目录的路径必须走这里,不能只 scan() */
@@ -135,11 +175,26 @@ class SkillRegistry {
     this.notify()
   }
 
-  getEnabled(): SkillMeta[] {
-    return this.skills.filter((s) => s.enabled && !s.error)
+  /** 启用的 skill;传了工作空间就叠上该项目的 `.cybertiger/skills`,同名覆盖全局 */
+  getEnabled(workspace = ''): SkillMeta[] {
+    const global = this.skills.filter((s) => s.enabled && !s.error)
+    if (!workspace.trim()) return global
+    const disabled = new Set(store.get('disabledSkills') ?? [])
+    // 与 `list()` 同一形状:目录要能标出「这一条来自项目」,否则模型分不清
+    // 同名覆盖后眼前这一份是全局的还是项目的
+    const project: SkillMeta[] = projectSkills(workspace, disabled)
+      .filter((s) => s.enabled && !s.error)
+      .map((s) => ({ ...s, scope: 'project' }))
+    return mergeByName(global, project)
   }
 
-  get(name: string): SkillMeta | undefined {
+  /** 按名字找;项目级同名条目优先(与 `getEnabled` 的覆盖方向一致) */
+  get(name: string, workspace = ''): SkillMeta | undefined {
+    if (workspace.trim()) {
+      const disabled = new Set(store.get('disabledSkills') ?? [])
+      const project = projectSkills(workspace, disabled).find((s) => s.name === name)
+      if (project) return project
+    }
     return this.skills.find((s) => s.name === name)
   }
 
@@ -153,15 +208,15 @@ class SkillRegistry {
   }
 
   /** SKILL.md 正文(不含 frontmatter) */
-  readBody(name: string): string {
-    const skill = this.requireEnabled(name)
+  readBody(name: string, workspace = ''): string {
+    const skill = this.requireEnabled(name, workspace)
     const content = fs.readFileSync(path.join(skill.dir, SKILL_FILE), 'utf8')
     return parseSkillFile(content).body
   }
 
   /** skill 目录下的文件相对路径列表(排除来源记录文件) */
-  listFiles(name: string): string[] {
-    const skill = this.requireEnabled(name)
+  listFiles(name: string, workspace = ''): string[] {
+    const skill = this.requireEnabled(name, workspace)
     const files: string[] = []
     const walk = (dir: string, rel: string, depth: number): void => {
       if (depth > 5) return
@@ -177,8 +232,8 @@ class SkillRegistry {
   }
 
   /** 读取 skill 目录内的文本文件;路径逃逸、符号链接逃逸、超大或二进制文件都拒绝 */
-  readFile(name: string, relPath: string): string {
-    const skill = this.requireEnabled(name)
+  readFile(name: string, relPath: string, workspace = ''): string {
+    const skill = this.requireEnabled(name, workspace)
     const root = fs.realpathSync(skill.dir)
     const target = path.resolve(root, relPath)
     if (target !== root && !target.startsWith(root + path.sep)) {
@@ -196,7 +251,9 @@ class SkillRegistry {
     const stat = fs.statSync(real)
     if (!stat.isFile()) throw new Error(`${relPath} 不是文件`)
     if (stat.size > MAX_FILE_BYTES) {
-      throw new Error(`文件过大(${Math.round(stat.size / 1024)} KB),上限 ${MAX_FILE_BYTES / 1024} KB`)
+      throw new Error(
+        `文件过大(${Math.round(stat.size / 1024)} KB),上限 ${MAX_FILE_BYTES / 1024} KB`
+      )
     }
     if (!TEXT_EXTENSIONS.has(path.extname(real).toLowerCase())) {
       throw new Error(`不支持读取该类型的文件:${path.extname(real) || '(无扩展名)'}`)
@@ -204,8 +261,8 @@ class SkillRegistry {
     return fs.readFileSync(real, 'utf8')
   }
 
-  private requireEnabled(name: string): SkillMeta {
-    const skill = this.get(name)
+  private requireEnabled(name: string, workspace = ''): SkillMeta {
+    const skill = this.get(name, workspace)
     if (!skill) throw new Error(`skill "${name}" 不存在`)
     if (skill.error) throw new Error(`skill "${name}" 无法加载:${skill.error}`)
     if (!skill.enabled) throw new Error(`skill "${name}" 已被禁用`)

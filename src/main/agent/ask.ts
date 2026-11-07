@@ -1,4 +1,4 @@
-import type { AskUserAnswer, AskUserQuestion } from '../chat/dto'
+import type { AskUserQuestion, AskUserSettlement } from '../chat/dto'
 import type { ToolDefinition } from '../tools/types'
 
 export const ASK_USER_TOOL_NAME = 'ask_user'
@@ -6,8 +6,11 @@ export const ASK_USER_TOOL_NAME = 'ask_user'
 /** 候选项的上限:再多也只是把一张卡片变成一屏,用户看不清也选不完 */
 const OPTIONS_MAX = 6
 
-/** 把提问送到渲染层并等用户的作答;由 service 现构造(它才握着 emit、scope 与本次 run 的 signal) */
-export type AskUserHandler = (question: AskUserQuestion, callId: string) => Promise<AskUserAnswer>
+/** 把提问送到渲染层并等它了结;由 service 现构造(它才握着 emit、scope 与本次 run 的 signal) */
+export type AskUserHandler = (
+  question: AskUserQuestion,
+  callId: string
+) => Promise<AskUserSettlement>
 
 /**
  * 一个候选项的文本。
@@ -41,11 +44,13 @@ function normalizeOptions(value: unknown): string[] {
  *
  * 不写「请据此继续」「请再确认一次」这类祈使:模型会把它当成本轮待办去执行,
  * 这个项目在工具结果文案上踩过两次同样的坑(见 AGENTS.md 的错误处理一条)。
- * 三种形状各说一件事:选了什么、用户跳过了、这一轮已经中止。
+ * 四种形状各说一件事:选了什么、用户跳过了、这一轮已经中止、时限内没人作答 ——
+ * 后两种都不是「用户看过后决定不说」,混成一句会让模型误解成一次真实的取舍。
  */
-export function describeAnswer(answer: AskUserAnswer): string {
-  if (answer === null) return '[本轮已中止,没有拿到用户的回答]'
-  const picked = answer.map((item) => item.trim()).filter(Boolean)
+export function describeAnswer(settlement: AskUserSettlement): string {
+  if (settlement.kind === 'aborted') return '[本轮已中止,没有拿到用户的回答]'
+  if (settlement.kind === 'timeout') return '[用户未在时限内作答,没有拿到回答]'
+  const picked = settlement.answers.map((item) => item.trim()).filter(Boolean)
   if (picked.length === 0) return '[用户跳过了这个问题,没有给出选择]'
   return `用户的回答:${picked.map((item) => `「${item}」`).join('、')}`
 }
@@ -60,10 +65,13 @@ export function describeAnswer(answer: AskUserAnswer): string {
 export function createAskUserTool(ask: AskUserHandler): ToolDefinition {
   return {
     name: ASK_USER_TOOL_NAME,
+    // 同一轮里同一个问题不必问第二遍:答案已经是本轮的事实,再弹一次卡片只是打扰
+    reuseInRun: true,
     description:
       '向用户提出一个问题并等他在界面上选择,用于只有用户那边才有答案的分叉:' +
       '需求含糊、有几个都合理的方案、要改动的范围或文件不确定、需要用户确认取舍。' +
-      'question 是一句话说清在什么之间做选择;options 是 2 到 4 个可以直接当答案的短语;' +
+      'question 是一句话说清在什么之间做选择;options 是 2 到 6 个可以直接当答案的短语,' +
+      '通常 2 到 4 个就够;' +
       'multiSelect 为 true 时用户可以多选。' +
       '界面会自动提供一个自己输入的位置,所以候选项里不必自己加「其他」。' +
       '一次调用只问一个问题,要问几件事就分几次调用。' +
@@ -79,7 +87,7 @@ export function createAskUserTool(ask: AskUserHandler): ToolDefinition {
         options: {
           type: 'array',
           items: { type: 'string' },
-          description: '候选答案,2 到 4 条,每条本身就能当答案;不要写编号或前缀'
+          description: '候选答案,2 到 6 条(通常 2 到 4 条),每条本身就能当答案;不要写编号或前缀'
         },
         multiSelect: {
           type: 'boolean',

@@ -208,12 +208,23 @@ describe('档位表:MCP 与不在审批面内的工具', () => {
     ).toBe(false)
   })
 
-  it('ask_user 与 task 不在审批面内:前者本来就停在用户身上,后者各自过闸门', () => {
+  it('登记过的面外工具在询问审批与自动审批都免审', () => {
     for (const mode of ['ask', 'auto'] as PermissionMode[]) {
       expect(asks({ mode, toolName: 'ask_user', args: { question: 'x' } })).toBe(false)
       expect(asks({ mode, toolName: 'task', args: { prompt: 'x' } })).toBe(false)
       expect(asks({ mode, toolName: 'get_current_time', args: {} })).toBe(false)
+      expect(asks({ mode, toolName: 'load_skill', args: { name: 'x' } })).toBe(false)
+      expect(asks({ mode, toolName: 'read_skill_file', args: { name: 'x' } })).toBe(false)
     }
+  })
+
+  it('没登记的内置工具默认进审批面:漏登记一份判定表不该等于免审', () => {
+    const requirement = needsApproval(query({ mode: 'auto', toolName: 'mystery_tool', args: {} }))
+    expect(requirement).not.toBeNull()
+    expect(requirement?.risk).toBe('elevated')
+    expect(requirement?.detail.join('\n')).toContain('未登记的内置工具')
+    // 完全访问那一档仍然免审:那一档的意思就是「面内全免」
+    expect(asks({ mode: 'full', toolName: 'mystery_tool', args: {} })).toBe(false)
   })
 
   it('子 Agent 发起时载荷会写明是谁在动手', () => {

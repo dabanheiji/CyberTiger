@@ -6,7 +6,7 @@ import {
 } from '../../../src/main/agent/ask'
 import { createToolRunner } from '../../../src/main/tools/registry'
 import { runAgent, MAIN_AGENT_MAX_STEPS } from '../../../src/main/agent/loop'
-import type { AskUserAnswer, AskUserQuestion } from '../../../src/main/chat/dto'
+import type { AskUserQuestion, AskUserSettlement } from '../../../src/main/chat/dto'
 import {
   makeCall,
   makeEmit,
@@ -20,7 +20,7 @@ import {
 interface RecordedAsk {
   question: AskUserQuestion
   callId: string
-  answer: (value: AskUserAnswer) => void
+  answer: (value: AskUserSettlement) => void
 }
 
 /**
@@ -28,10 +28,10 @@ interface RecordedAsk {
  * run 是否真的停在一次提问上,只有靠这种可控的等待才能断言。
  * 不传 `auto` 就留在等待中,由测试自己决定何时给出答案。
  */
-function makeAsker(auto?: AskUserAnswer): { handler: AskUserHandler; asks: RecordedAsk[] } {
+function makeAsker(auto?: AskUserSettlement): { handler: AskUserHandler; asks: RecordedAsk[] } {
   const asks: RecordedAsk[] = []
   const handler: AskUserHandler = (question, callId) =>
-    new Promise<AskUserAnswer>((resolve) => {
+    new Promise<AskUserSettlement>((resolve) => {
       asks.push({ question, callId, answer: resolve })
       if (auto !== undefined) resolve(auto)
     })
@@ -45,7 +45,7 @@ function makeAsker(auto?: AskUserAnswer): { handler: AskUserHandler; asks: Recor
 async function callTool(
   args: Record<string, unknown>,
   callId = 'call-1',
-  auto: AskUserAnswer = []
+  auto: AskUserSettlement = { kind: 'answered', answers: [] }
 ): Promise<{ ok: boolean; result: string; ask: RecordedAsk }> {
   const { handler, asks } = makeAsker(auto)
   const tool = createAskUserTool(handler)
@@ -134,9 +134,10 @@ describe('ask_user 的参数归一', () => {
   })
 
   it('工具结果就是给模型看的作答文本,通道给出的形状原样翻译', async () => {
-    const { result } = await callTool({ question: '用哪个库', options: ['SQLite'] }, 'c', [
-      'SQLite'
-    ])
+    const { result } = await callTool({ question: '用哪个库', options: ['SQLite'] }, 'c', {
+      kind: 'answered',
+      answers: ['SQLite']
+    })
     expect(result).toBe('用户的回答:「SQLite」')
   })
 })
@@ -168,25 +169,41 @@ describe('ask_user 的 schema 与描述', () => {
   it('描述说明一次只问一件事:嵌套两层数组的 schema 对小模型太难', () => {
     expect(createAskUserTool(makeAsker().handler).description).toContain('一次调用只问一个问题')
   })
+
+  it('候选数文案与上限 6 对齐:写小了这个上限就只是摆设', () => {
+    const tool = createAskUserTool(makeAsker().handler)
+    expect(tool.description).toContain('2 到 6')
+    expect(JSON.stringify(tool.parameters)).toContain('2 到 6')
+  })
 })
 
 describe('describeAnswer:用户作答写成给模型看的文本', () => {
   it('选中的项用陈述句列出,多选时逐项用顿号分开', () => {
-    expect(describeAnswer(['SQLite'])).toBe('用户的回答:「SQLite」')
-    expect(describeAnswer(['加索引', '分表'])).toBe('用户的回答:「加索引」、「分表」')
+    expect(describeAnswer({ kind: 'answered', answers: ['SQLite'] })).toBe('用户的回答:「SQLite」')
+    expect(describeAnswer({ kind: 'answered', answers: ['加索引', '分表'] })).toBe(
+      '用户的回答:「加索引」、「分表」'
+    )
   })
 
   it('空数组说「用户跳过了」,不写成错误', () => {
     // 跳过是合法选择:模型据此按自己的判断继续,而不是以为工具坏了
-    expect(describeAnswer([])).toContain('跳过了')
+    expect(describeAnswer({ kind: 'answered', answers: [] })).toContain('跳过了')
   })
 
-  it('null 说「本轮已中止,没有拿到回答」,模型不会把它当成空答案继续编', () => {
-    expect(describeAnswer(null)).toContain('已中止')
+  it('中止说「本轮已中止,没有拿到回答」,模型不会把它当成空答案继续编', () => {
+    expect(describeAnswer({ kind: 'aborted' })).toContain('已中止')
+  })
+
+  it('超时说「未在时限内作答」,与「用户跳过了」是两件事:写出后者会让模型以为用户看过', () => {
+    const text = describeAnswer({ kind: 'timeout' })
+    expect(text).toContain('未在时限内作答')
+    expect(text).not.toContain('跳过')
   })
 
   it('前后空白与空白项不产出空的「『』」', () => {
-    expect(describeAnswer([' 甲 ', '', '  '])).toBe('用户的回答:「甲」')
+    expect(describeAnswer({ kind: 'answered', answers: [' 甲 ', '', '  '] })).toBe(
+      '用户的回答:「甲」'
+    )
   })
 })
 
@@ -194,7 +211,7 @@ describe('describeAnswer:用户作答写成给模型看的文本', () => {
  * 用真实的 runner 起一次 run:提问工具、循环、落库与事件一起过。
  * run 会停在 pending 的那次提问上,所以返回的进行中 Promise 由调用方决定何时 await。
  *
- * 这里的通道照 `chat/questions.ts` 的语义实现中止分支(signal 一到就按「没拿到回答」收场),
+ * 这里的通道照 `chat/questions.ts` 的语义实现中止分支(signal 一到就按「本轮已中止」收场),
  * 因为生产代码的中止逻辑住在 service 闭包住的 gate 里,而 service 要 DB、进不了单测。
  */
 function startRun(
@@ -209,14 +226,14 @@ function startRun(
 } {
   const asks: RecordedAsk[] = []
   const handler: AskUserHandler = (question, callId) =>
-    new Promise<AskUserAnswer>((resolve) => {
-      const settle = (answer: AskUserAnswer): void => {
+    new Promise<AskUserSettlement>((resolve) => {
+      const settle = (settlement: AskUserSettlement): void => {
         signal.removeEventListener('abort', onAbort)
-        resolve(answer)
+        resolve(settlement)
       }
-      const onAbort = (): void => settle(null)
+      const onAbort = (): void => settle({ kind: 'aborted' })
       asks.push({ question, callId, answer: settle })
-      if (signal.aborted) resolve(null)
+      if (signal.aborted) resolve({ kind: 'aborted' })
       else signal.addEventListener('abort', onAbort, { once: true })
     })
   const model = makeModel(script)
@@ -273,7 +290,7 @@ describe('run 阻塞在提问上', () => {
     // 提问已发出,但那一次调用还没有结果:run 就停在这里
     expect(collected.of('tool_result')).toHaveLength(0)
 
-    asks[0].answer(['SQLite'])
+    asks[0].answer({ kind: 'answered', answers: ['SQLite'] })
     await running
     expect(collected.of('tool_result')[0].result).toBe('用户的回答:「SQLite」')
   })
@@ -289,7 +306,7 @@ describe('run 阻塞在提问上', () => {
       new AbortController().signal
     )
     await waitAsked(asks)
-    asks[0].answer(['SQLite'])
+    asks[0].answer({ kind: 'answered', answers: ['SQLite'] })
     await running
 
     const toolMessage = model.requests[1].messages.find((m) => m.role === 'tool')
@@ -315,7 +332,7 @@ describe('run 阻塞在提问上', () => {
     // 参数键序不同也算同一个问题:去重的 key 会把 JSON 排序后比对。
     // 只问一次 = 通道只被叫一次,第二次不再弹卡片,用户不会被同一个问题打断两遍。
     expect(asks).toHaveLength(1)
-    asks[0].answer(['SQLite'])
+    asks[0].answer({ kind: 'answered', answers: ['SQLite'] })
     await running
 
     const results = collected.of('tool_result')
@@ -337,5 +354,21 @@ describe('run 阻塞在提问上', () => {
     expect(collected.of('tool_result')[0].result).toContain('已中止')
     // 已落库的 assistant 行带着那次调用,必须有对应的 tool 行,否则下一轮回放 400
     expect(store.toolRows.map((r) => r.toolCallId)).toEqual(['q1'])
+  })
+
+  it('等到时限仍没人作答:这一轮按「没拿到回答」继续,而不是永远停在提问上', async () => {
+    // 窗口关了 / 渲染层崩了时 run 不能永久悬着,否则它占着的会话切不了目录也压不了上下文
+    const { collected, asks, running } = startRun(
+      [
+        { toolCalls: [makeCall('ask_user', '{"question":"用哪个库","options":["SQLite"]}', 'q1')] },
+        { content: '那我按默认方案来' }
+      ],
+      new AbortController().signal
+    )
+    await waitAsked(asks)
+    asks[0].answer({ kind: 'timeout' })
+    const result = await running
+    expect(result.aborted).toBe(false)
+    expect(collected.of('tool_result')[0].result).toContain('未在时限内作答')
   })
 })

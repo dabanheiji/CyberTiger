@@ -14,7 +14,8 @@ import {
   setWorkspace,
   answerQuestion,
   decideApproval,
-  pendingApprovals
+  pendingApprovals,
+  pendingQuestions
 } from '../chat/controller'
 import {
   getStatus as mcpGetStatus,
@@ -46,9 +47,10 @@ export function registerIpc(): void {
   ipcMain.handle('chat:pickWorkspace', pickWorkspace)
   ipcMain.handle('chat:setWorkspace', setWorkspace)
   ipcMain.handle('chat:answerQuestion', answerQuestion)
-  // 审批:交回决定 + 重载后拉回还挂着的卡片
+  // 审批与提问:交回决定/答案 + 重载后拉回还挂着的卡片
   ipcMain.handle('chat:decideApproval', decideApproval)
   ipcMain.handle('chat:pendingApprovals', pendingApprovals)
+  ipcMain.handle('chat:pendingQuestions', pendingQuestions)
 
   ipcMain.handle('mcp:getStatus', mcpGetStatus)
   ipcMain.handle('mcp:saveConfig', mcpSaveConfig)

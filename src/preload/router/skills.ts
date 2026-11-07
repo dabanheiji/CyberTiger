@@ -3,7 +3,9 @@ import type { IpcResult } from '../../main/chat/dto'
 import type { DiscoverResult, InstallResult, SkillMeta } from '../../main/skills/types'
 
 export default {
-  list: (): Promise<IpcResult<{ skills: SkillMeta[] }>> => ipcRenderer.invoke('skills:list'),
+  /** 传工作空间时把该项目的 `.cybertiger/skills` 一并带回;设置页不传 */
+  list: (workspace?: string): Promise<IpcResult<{ skills: SkillMeta[] }>> =>
+    ipcRenderer.invoke('skills:list', workspace),
   setEnabled: (name: string, enabled: boolean): Promise<IpcResult<null>> =>
     ipcRenderer.invoke('skills:setEnabled', name, enabled),
   /** 在系统文件管理器里打开 skills 目录 */
@@ -14,7 +16,11 @@ export default {
   /** 弹系统对话框选本地文件夹或 zip;取消时 data 为 null */
   importLocal: (): Promise<IpcResult<DiscoverResult | null>> =>
     ipcRenderer.invoke('skills:importLocal'),
-  install: (sessionId: string, names: string[], overwrite: boolean): Promise<IpcResult<InstallResult>> =>
+  install: (
+    sessionId: string,
+    names: string[],
+    overwrite: boolean
+  ): Promise<IpcResult<InstallResult>> =>
     ipcRenderer.invoke('skills:install', sessionId, names, overwrite),
   /** 放弃本次安装,清理临时文件 */
   cancel: (sessionId: string): Promise<IpcResult<null>> =>

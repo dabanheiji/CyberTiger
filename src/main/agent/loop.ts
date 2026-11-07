@@ -12,7 +12,12 @@ import type {
   ToolCallRecord,
   TokenUsage
 } from '../chat/dto'
-import type { ToolContext, ToolExecResult, ToolRunner } from '../tools/registry'
+import {
+  isVolatileTool,
+  type ToolContext,
+  type ToolExecResult,
+  type ToolRunner
+} from '../tools/registry'
 import type { RunHooks } from '../hooks/set'
 import { estimateRequestTokens, estimateTextTokens } from '../tokens/estimate'
 import {
@@ -41,24 +46,37 @@ const ANCHOR_ROLE = 'user' as const
 
 /**
  * 本轮内工具去重的 key:同名 + 语义相同的参数。
- * 参数是模型生成的 JSON,键序可能不同,所以先排序再比对;解析不了就退回原文
- * (反正执行时也会被参数校验拦下)。
+ * 参数是模型生成的 JSON,键序可能不同,所以递归排序后再比对;数组保序。
+ * 超过深度上限时退回原文 —— 宁可少命中一次缓存,也不把两份不同参数判成同一份。
+ * 解析不了也退回原文(反正执行时会被参数校验拦下)。
  */
+const TOOL_KEY_MAX_DEPTH = 8
+
+function stableValue(value: unknown, depth = 0): string {
+  if (depth > TOOL_KEY_MAX_DEPTH) return JSON.stringify(value) ?? 'null'
+  if (value === null) return 'null'
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableValue(item, depth + 1)).join(',')}]`
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a.localeCompare(b)
+    )
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableValue(item, depth + 1)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value) ?? String(value)
+}
+
 function toolKey(call: ToolCallRecord): string {
   const raw = call.arguments.trim()
   if (!raw) return `${call.name}|{}`
   try {
-    const parsed: unknown = JSON.parse(raw)
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const entries = Object.entries(parsed as Record<string, unknown>).sort(([a], [b]) =>
-        a.localeCompare(b)
-      )
-      return `${call.name}|${JSON.stringify(entries)}`
-    }
+    return `${call.name}|${stableValue(JSON.parse(raw))}`
   } catch {
-    // 参数不是合法 JSON,按原文比对
+    return `${call.name}|${raw}`
   }
-  return `${call.name}|${raw}`
 }
 
 /**
@@ -299,8 +317,11 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
     .map((message, i) => ({ id: ids[i] ?? '', message }))
   const messages = (): ChatCompletionMessage[] => context.map((item) => item.message)
   const tools = params.runner.toChatCompletionTools()
-  // 同一 run 内"同名 + 同参数"的工具只真正执行一次。模型有时会为了"更新"重复发起
+  // 同一 run 内「同名 + 同参」的只读工具只真正执行一次。模型有时会为了"更新"重复发起
   // 一模一样的调用(实测:一轮里对 get_current_time 连调两次),这里直接复用上次结果。
+  // 进这张表的只有两类:`reuseInRun` 的只读工具,和装饰器标了 `reusable` 的「非执行
+  // 结论」(审批拒绝 / 钩子拦下 / 超时)。真正动了机器的调用执行完即清空,否则
+  // 「写文件→再读同路径」会拿回写之前的旧字节。
   const toolCache = new Map<string, ToolExecResult>()
   // 本次 run 要回答的那条请求(主 agent 是用户的最新消息,子 agent 是任务说明)
   const request = latestRequest(messages())
@@ -310,6 +331,20 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
   let finalContent = ''
   // 终局那一步的号:`afterAgent` 要写「跑到哪儿就停了」,而步号活在 for 里,四条出口够不着
   let step = 0
+  /**
+   * 异常路径的收场。`addToolMessage` 一旦抛错,本步已落库的 assistant `tool_calls`
+   * 就会缺对应 tool 行,下一轮回放直接 400,中途压缩还会把这个缺口固化成水位。
+   * 每步拿到调用就换上这一组,正常收完清空;`catch` 里据此补行。
+   */
+  let currentCalls: ToolCallRecord[] = []
+  let executedIds = new Set<string>()
+  let executedResults = new Map<string, ToolExecResult>()
+  /**
+   * 本轮已执行的工具与结论,**跨步累计**:中途压缩的便签要写下整轮做过什么。
+   * 每步新建的话,压完续跑只记得最近一步,前面已完成的工具会被重做一遍。
+   * 条数与每条长度由 `taskStateNote` 裁剪,这里不做上限。
+   */
+  const conclusions: { name: string; arguments: string; ok: boolean; result: string }[] = []
   /**
    * run 级否决的收场:形状与模型报错那一支相同(root 发 `error`,子 run 交回父级那次 `task`
    * 转成 `tool_result{ok:false}`),而它的 `finalContent` 是**已经做过的那些步**的正文 ——
@@ -464,10 +499,16 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
 
       if (content) finalContent = content
 
+      // 这一步的调用已随 assistant 行落库:后续任何一步抛错,`catch` 都按这组补行
+      currentCalls = calls
+      executedIds = new Set()
+      executedResults = new Map()
+
       // 收尾步(工具已被收走)与中止都不再执行调用,但这些调用已随 assistant 行落库,
       // 必须各有一条 tool 行收尾,否则下一轮回放就是孤儿 tool_calls
       if (signal.aborted || calls.length === 0 || finalStep) {
-        settleUnexecuted(store, scope, emit, calls, new Set())
+        settleUnexecuted(store, scope, emit, calls, executedIds)
+        currentCalls = []
         break
       }
 
@@ -485,16 +526,21 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
         }
       })
 
-      const executed = new Set<string>()
       // 本轮已执行的工具与结论:中途压缩时写进便签,续跑才知道什么不必再做
-      const conclusions: { name: string; arguments: string; ok: boolean; result: string }[] = []
       for (const call of calls) {
         if (signal.aborted) break
         emit({ type: 'tool_call', scope, messageId, call })
+        const definition = params.runner.definitions.find((d) => d.name === call.name)
+        // volatile 的工具即使标了复用也不缓存:它的结果本身就会随时间变化
+        const reusable =
+          definition?.reuseInRun === true && !isVolatileTool(call.name, params.runner.definitions)
         const key = toolKey(call)
+        // 「不是执行」的结论(审批拒绝、钩子拦下、超时)同样可以复用:它们没有动过机器,
+        // 而同一轮里就同一个问题再打断用户一次没有新信息。这份标记由装饰器给。
         const cached = toolCache.get(key)
+        const hit = cached && (reusable || cached.reusable === true) ? cached : undefined
         const exec =
-          cached ??
+          hit ??
           (await params.runner.execute(call.name, call.arguments, {
             callId: call.id,
             signal,
@@ -503,7 +549,17 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
             // 只有钩子读它:拦下一次调用时要说清是第几步的那一次,而步号只有循环手里有
             step
           }))
-        if (!cached) toolCache.set(key, exec)
+        if (hit) {
+          // 命中缓存,不执行
+        } else if (reusable || exec.reusable === true) {
+          toolCache.set(key, exec)
+        } else {
+          // 这次调用真的动了机器:此前缓存的只读快照全部作废
+          toolCache.clear()
+        }
+        // 先登记结论再写库:写库抛错时 `catch` 才能补回这次调用的真实结果,
+        // 而不是把一次已经发生的事写成「未执行」
+        executedResults.set(call.id, exec)
         const toolMessageId = store.addToolMessage(scope, call.id, exec.result)
         emit({
           type: 'tool_result',
@@ -512,7 +568,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
           callId: call.id,
           result: exec.result,
           ok: exec.ok,
-          reused: cached !== undefined
+          reused: hit !== undefined
         })
         context.push({
           id: toolMessageId,
@@ -524,10 +580,11 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
           ok: exec.ok,
           result: exec.result
         })
-        executed.add(call.id)
+        executedIds.add(call.id)
       }
       // 循环中途被停止:剩下的调用同样已经落库,一样要收尾
-      settleUnexecuted(store, scope, emit, calls, executed)
+      settleUnexecuted(store, scope, emit, calls, executedIds)
+      currentCalls = []
 
       // 越过触发线就在这次工具之后压一次:下一步的请求就只带摘要 + 最近的原文。
       // 收尾步不做 —— 下一步不给工具,本来就小,压了反而把要用的结论摘没。
@@ -538,12 +595,10 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
           step,
           request,
           units: asCompactUnits(units),
-          // 固定开销只算 system + 工具 + 下一步要贴的锚定;摘要单独作为 summaryTokens
+          // 固定开销 = system + 本步全部 pinned(钩子说明、目标锚定、收尾提示)+ 工具定义。
+          // 钩子说明最多 8 条 × 2000 字,漏掉它会让触发线算在偏小的一侧、压缩晚一拍
           sizing: {
-            fixedTokens: estimateRequestTokens(
-              [...(system ? [system] : []), ...(request ? [goalAnchor(request)] : [])],
-              tools
-            ),
+            fixedTokens: estimateRequestTokens([...(system ? [system] : []), ...pinned], tools),
             summaryTokens: tokensOf(head),
             window: budget.window
           },
@@ -589,6 +644,16 @@ export async function runAgent(params: RunAgentParams): Promise<RunResult> {
   } catch (error) {
     const aborted = signal.aborted
     const msg = aborted ? '' : error instanceof Error ? error.message : String(error)
+    // 异常收场:本步已落库的调用必须各有一条 tool 行,否则下一轮回放 400。
+    // 收场自己失败也不能盖掉原始错误 —— 用户该看到的是那次真正的故障。
+    if (currentCalls.length > 0) {
+      try {
+        settleUnexecuted(store, scope, emit, currentCalls, executedIds, executedResults)
+      } catch (settleError) {
+        console.error('[agent] settle unexecuted tools failed:', settleError)
+      }
+      currentCalls = []
+    }
     // 模型报错这一支(以及以异常形式到达的中止)同样在终局事件之前触发这一次;
     // `beforeAgent` 的否决**不**走这里 —— 那一轮根本没开始,报「已完成」是谎
     if (hooks) {
@@ -621,19 +686,28 @@ function settleUnexecuted(
   scope: RunScope,
   emit: (event: ChatStreamEvent) => void,
   calls: ToolCallRecord[],
-  executed: Set<string>
+  executed: Set<string>,
+  /** 已执行但没能写库的调用:补行时要写它真实的结果,不能把发生过的事说成「未执行」 */
+  results?: ReadonlyMap<string, ToolExecResult>
 ): void {
   for (const call of calls) {
     if (executed.has(call.id)) continue
-    const toolMessageId = store.addToolMessage(scope, call.id, UNEXECUTED_RESULT)
-    emit({
-      type: 'tool_result',
-      scope,
-      toolMessageId,
-      callId: call.id,
-      result: UNEXECUTED_RESULT,
-      ok: false
-    })
+    const known = results?.get(call.id)
+    const result = known?.result ?? UNEXECUTED_RESULT
+    try {
+      const toolMessageId = store.addToolMessage(scope, call.id, result)
+      emit({
+        type: 'tool_result',
+        scope,
+        toolMessageId,
+        callId: call.id,
+        result,
+        ok: known?.ok ?? false
+      })
+    } catch (error) {
+      // 一条补不上不该让剩下的也成孤儿:继续补其余的,这一条只能留一行日志
+      console.error('[agent] settle unexecuted tool failed:', call.id, error)
+    }
   }
 }
 

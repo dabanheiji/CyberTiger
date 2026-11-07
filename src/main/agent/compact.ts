@@ -554,6 +554,10 @@ async function summarizeOne(
 
 /** 便签里每条工具结论的截断长度:摘要请求自己也要留额度 */
 const NOTE_RESULT_CLIP = 160
+/** 便签里每次调用的参数截断长度:与结果同口径,免得一条超长命令吃掉整段额度 */
+const NOTE_ARGUMENTS_CLIP = 200
+/** 便签最多写最近几次调用;更早的只留一句省略数(它们已在摘要覆盖的历史里) */
+export const MAX_TASK_STATE_TOOLS = 8
 
 export interface TaskStateInput {
   /** 本轮要回答的请求 */
@@ -583,9 +587,14 @@ export function taskStateNote(input: TaskStateInput): string {
     lines.push('- 已执行的工具:(无)')
   } else {
     lines.push('- 已执行的工具与结论:')
-    for (const call of input.executed) {
+    // 只留最近几次:更早的那些已经在摘要覆盖的历史里,而便签本身要留出额度
+    const shown = input.executed.slice(-MAX_TASK_STATE_TOOLS)
+    const omitted = input.executed.length - shown.length
+    if (omitted > 0) lines.push(`  - 更早的 ${omitted} 次调用已省略`)
+    for (const call of shown) {
+      const args = call.arguments.replace(/\s+/g, ' ').slice(0, NOTE_ARGUMENTS_CLIP)
       const result = call.result.replace(/\s+/g, ' ').slice(0, NOTE_RESULT_CLIP)
-      lines.push(`  - ${call.name}(${call.arguments}) → ${call.ok ? '成功' : '失败'}:${result}`)
+      lines.push(`  - ${call.name}(${args}) → ${call.ok ? '成功' : '失败'}:${result}`)
     }
   }
   const assistant = input.lastAssistant.replace(/\s+/g, ' ').slice(0, NOTE_RESULT_CLIP)

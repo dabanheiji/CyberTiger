@@ -10,6 +10,11 @@ export interface SkillMeta {
   description: string
   /** 绝对路径 */
   dir: string
+  /**
+   * 条目来自哪一层。全局条目不填；只有项目级那一份带 `'project'`。
+   * 界面据此标出来源，设置页的启停 / 卸载也只对全局那一条有意义。
+   */
+  scope?: 'global' | 'project'
   license?: string
   compatibility?: string
   metadata?: Record<string, string>

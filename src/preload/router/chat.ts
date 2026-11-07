@@ -10,6 +10,7 @@ import type {
   answerQuestionDto,
   decideApprovalDto,
   PendingApprovalDto,
+  PendingQuestionDto,
   ChatStreamEvent,
   CompactReport,
   IpcResult
@@ -63,6 +64,13 @@ export default {
    */
   pendingApprovals: (): Promise<IpcResult<PendingApprovalDto[]>> =>
     ipcRenderer.invoke('chat:pendingApprovals'),
+  /**
+   * 当前还挂着的提问。
+   * 与 `pendingApprovals` 同一个洞:重载后事件订阅是全新的、流式状态归零,
+   * 靠这个把提问卡片填回来 —— 否则主进程仍阻塞在那次 ask_user 上,界面无处作答。
+   */
+  pendingQuestions: (): Promise<IpcResult<PendingQuestionDto[]>> =>
+    ipcRenderer.invoke('chat:pendingQuestions'),
   /** 订阅流式事件,返回取消订阅函数 */
   onStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)

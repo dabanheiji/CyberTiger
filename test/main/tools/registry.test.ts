@@ -181,6 +181,19 @@ describe('执行失败一律转成可读说明', () => {
   })
 })
 
+describe('reuseInRun 标记', () => {
+  it('只读的内置工具允许本轮复用,会改变本机的工具不标', () => {
+    const flags = Object.fromEntries(builtinTools.map((t) => [t.name, t.reuseInRun === true]))
+    expect(flags.read_file).toBe(true)
+    expect(flags.load_skill).toBe(true)
+    expect(flags.read_skill_file).toBe(true)
+    // 写文件 / 跑命令 / 取时间:缓存命中等于把一次真实副作用或一次重新取值吞掉
+    expect(flags.write_file).toBe(false)
+    expect(flags.run_command).toBe(false)
+    expect(flags.get_current_time).toBe(false)
+  })
+})
+
 describe('isVolatileTool', () => {
   const definitions = [
     spyTool('get_current_time', 'now', true).definition,

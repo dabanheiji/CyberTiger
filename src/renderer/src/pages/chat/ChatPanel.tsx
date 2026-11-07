@@ -405,8 +405,13 @@ function ChatPanel({
   const [value, setValue] = useState('')
   // 通过 / 选中的 skill,发送后清空
   const [activeSkill, setActiveSkill] = useState<string | null>(null)
-  const skills = useSkills()
+  // 敲 / 打开面板时递增,让 hook 重拉一次 —— 项目目录没有 watcher
+  const [skillsEpoch, setSkillsEpoch] = useState(0)
+  // 带工作空间:项目级 .cybertiger/skills 会叠在全局之上,同名由项目覆盖
+  const skills = useSkills(workspace, sending, skillsEpoch)
   const enabledSkills = skills.filter((s) => s.enabled && !s.error)
+  // 解析失败的条目也进下拉(灰色不可选):静默消失等于用户不知道这里有一条坏了
+  const brokenSkills = skills.filter((s) => s.error)
   // 没有模型的服务商不参与选择,否则会多出一个空的分组标题
   const selectable = providers.filter((p) => p.models.length > 0)
   // 窗口跟着当前选择走;气泡底部的百分比和进度条共用同一个数,两处不会各说一套
@@ -529,25 +534,53 @@ function ChatPanel({
           // cascader 默认给弹层 minWidth:'auto'(内容驱动),覆盖 stretch 算出的触发元素宽度;
           // 重置为 0 让弹层宽度跟随输入框,随窗口自适应
           popupStyle={{ minWidth: 0 }}
-          items={enabledSkills.map((s) => ({
-            value: s.name,
-            // 名称：描述 融合为单个 label 项,配合 flex:1 + ellipsis 铺满弹层宽度
-            label: (
-              <span
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
-                }}
-              >
-                {s.name}
-                {s.description ? `：${s.description}` : ''}
-              </span>
-            ),
-            icon: <ThunderboltOutlined />
-          }))}
+          items={[
+            ...enabledSkills.map((s) => ({
+              value: s.name,
+              // 名称：描述 融合为单个 label 项,配合 flex:1 + ellipsis 铺满弹层宽度
+              label: (
+                <span
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}
+                >
+                  {s.scope === 'project' && <Tag bordered={false}>项目</Tag>}
+                  <span
+                    style={{
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {s.name}
+                    {s.description ? `：${s.description}` : ''}
+                  </span>
+                </span>
+              ),
+              icon: <ThunderboltOutlined />
+            })),
+            ...brokenSkills.map((s) => ({
+              value: s.name,
+              disabled: true,
+              label: (
+                <span
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}
+                >
+                  {s.scope === 'project' && <Tag bordered={false}>项目</Tag>}
+                  <span
+                    style={{
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {s.name}：无法加载（{s.error}）
+                  </span>
+                </span>
+              ),
+              icon: <ThunderboltOutlined />
+            }))
+          ]}
           onSelect={(name) => {
             setActiveSkill(name)
             setValue('')
@@ -568,7 +601,7 @@ function ChatPanel({
             })
           }}
         >
-          {({ onTrigger, onKeyDown }) => (
+          {({ onTrigger, onKeyDown, open }) => (
             <Sender
               value={value}
               onChange={(next, _event, _slotConfig, skill) => {
@@ -588,7 +621,12 @@ function ChatPanel({
                   })
                 }
                 // 只在输入框内容恰好是 "/" 开头且不含空格时弹出,避免正文里的斜杠误触发
-                if (next.startsWith('/') && !next.includes(' ') && enabledSkills.length > 0) {
+                const slash = next.startsWith('/') && !next.includes(' ')
+                // 面板每次从关到开都重拉一次:项目目录没有 watcher,模型刚写的 skill 靠它现身。
+                // 用 open 判「刚打开」而不是只判 slash,否则连续敲 /w 会每键拉一次
+                if (slash && !open) setSkillsEpoch((n) => n + 1)
+                // 只有坏条目时也允许打开:那一行灰色项就是「为什么这里没有 skill」的答案
+                if (slash && skills.length > 0) {
                   onTrigger()
                 } else {
                   onTrigger(false)

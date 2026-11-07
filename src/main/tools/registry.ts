@@ -20,10 +20,10 @@ export const builtinTools: ToolDefinition[] = [
 ]
 
 /** 当前全部可用工具:内置 + 已连接的 MCP server 提供的。每次调用实时计算 */
-export function getAllTools(): ToolDefinition[] {
+export function getAllTools(workspace = ''): ToolDefinition[] {
   // MCP 部分按名字排序:server 的重连顺序会变,而 tools 排在请求的最前面,
   // 它一变就把整段前缀的提示缓存打掉(见 agent/compact.ts 的前缀稳定纪律)
-  const mcp = [...mcpManager.getTools()].sort((a, b) => a.name.localeCompare(b.name))
+  const mcp = [...mcpManager.getTools(workspace)].sort((a, b) => a.name.localeCompare(b.name))
   return [...builtinTools, ...mcp]
 }
 
@@ -33,8 +33,8 @@ export function getAllTools(): ToolDefinition[] {
  * 审批判定要靠它区分「外部代码」那一档:光看名字里有没有 `__` 是把 sanitize 的编码规则
  * 当类型用,而 `getAllTools()` 与它是同一时刻读 `mcpManager`,不会有快照错位。
  */
-export function getMcpToolNames(): Set<string> {
-  return new Set(mcpManager.getTools().map((t) => t.name))
+export function getMcpToolNames(workspace = ''): Set<string> {
+  return new Set(mcpManager.getTools(workspace).map((t) => t.name))
 }
 
 /**

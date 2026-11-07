@@ -107,9 +107,11 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
   const {
     streaming,
     detachedApproval,
+    detachedQuestion,
     start: startReply,
     abort: abortReply,
-    refreshApprovals
+    refreshApprovals,
+    refreshQuestions
   } = useAgentStream({
     onDone: finishReply,
     onError: async (conversationId, msg) => {
@@ -300,23 +302,15 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
     void abortReply()
   }
 
-  /**
-   * 把用户的选择交回主进程:那边正阻塞在同一次 ask_user 工具调用上,答案到手这一轮才继续。
-   * 卡片的收起交给同一次调用的 tool_result 事件,这里只负责送答案 —— 送不出去时(提问已
-   * 了结)把原因说清就好,静默失败看起来像按钮没反应。
-   */
-  const handleAnswerQuestion = async (answers: string[]): Promise<void> => {
-    const pending = streaming?.pendingQuestion
-    if (!pending) return
-    const res = await window.api.chat.answerQuestion({
-      questionId: pending.questionId,
-      answers
-    })
-    if (!res.success) message.error(res.msg)
-  }
-
   /** 只把属于当前会话的流式内容交给面板,切走时不显示 */
   const shownRun = streaming?.conversationId === activeId ? streaming : null
+
+  /**
+   * 当前会话要显示的提问:与审批同一条优先级 —— 正在跟踪的那一轮优先,
+   * 其次是从主进程等待表拉回来的那条(`detachedQuestion`,典型场景是渲染层重载:
+   * 订阅是新的、流式状态归零,而主进程还阻塞在那次 ask_user 调用上)。
+   */
+  const shownQuestion = shownRun?.pendingQuestion ?? detachedQuestion
 
   /**
    * 当前会话要显示的审批请求:优先正在跟踪的那一轮,其次是从主进程等待表拉回来的那条
@@ -324,6 +318,24 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
    * 典型场景是渲染层重载 —— 订阅是新的、流式状态归零,而主进程还阻塞在那次工具调用上)。
    */
   const shownApproval = shownRun?.pendingApproval ?? detachedApproval
+
+  /**
+   * 把用户的选择交回主进程:那边正阻塞在同一次 ask_user 工具调用上,答案到手这一轮才继续。
+   * 卡片的收起交给同一次调用的 tool_result 事件,这里只负责送答案 —— 送不出去时(提问已
+   * 了结)把原因说清就好,静默失败看起来像按钮没反应。
+   *
+   * 送完一定重读一次等待表,理由与审批那条相同:成功时不必等 tool_result,失败时
+   * (刚超时 / 刚被中止)更要据此收卡,否则卡片会留在一个再也送不出去的选择上。
+   */
+  const handleAnswerQuestion = async (answers: string[]): Promise<void> => {
+    if (!shownQuestion) return
+    const res = await window.api.chat.answerQuestion({
+      questionId: shownQuestion.questionId,
+      answers
+    })
+    if (!res.success) message.error(res.msg)
+    await refreshQuestions(activeIdRef.current ?? '')
+  }
 
   /**
    * 把用户的决定交回主进程:那边正阻塞在同一次工具调用上,决定到手这一轮才继续。
@@ -378,7 +390,8 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
    */
   useEffect(() => {
     void refreshApprovals(activeId ?? '')
-  }, [activeId, refreshApprovals])
+    void refreshQuestions(activeId ?? '')
+  }, [activeId, refreshApprovals, refreshQuestions])
 
   /**
    * 手动压缩当前会话的上下文。
@@ -466,7 +479,7 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
       <ChatPanel
         messages={messages}
         streaming={shownRun}
-        pendingQuestion={shownRun?.pendingQuestion ?? null}
+        pendingQuestion={shownQuestion}
         pendingApproval={shownApproval}
         permissions={permissions}
         isDraft={activeId === null}
