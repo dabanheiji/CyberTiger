@@ -217,6 +217,63 @@ export interface PendingQuestionDto {
 }
 
 /**
+ * 让 plan-agent 生成一份实施计划。
+ * 需求本身已经作为 user 行落库,这里只告诉主进程「为哪次需求规划」;
+ * providerId / model 与 generateReply 同语义。
+ */
+export interface generatePlanDto {
+  conversationId: string
+  providerId?: string
+  model: string
+}
+
+/**
+ * 按用户的修改意见重新生成计划。
+ * feedback 同时也会被界面落成一条 user 行(那是这次修订在聊天里的痕迹),
+ * 但这里显式再传一份:请求需要把它和「上一版计划」摆在一起,而最后一条 user 行
+ * 到这里已经变成 feedback 本身,推不出需求原文。
+ */
+export interface revisePlanDto {
+  conversationId: string
+  feedback: string
+  providerId?: string
+  model: string
+}
+
+/** 批准待审批的计划:写计划文件、生成任务文件路径、启动执行 run */
+export interface approvePlanDto {
+  conversationId: string
+  providerId?: string
+  model: string
+}
+
+/** 放弃待审批的计划:删掉最后一条 user 行之后的全部计划草稿 */
+export interface discardPlanDto {
+  conversationId: string
+}
+
+/**
+ * 一份待审批的计划,由会话消息现推出来。
+ * `workspace` 是批准时将要落盘的位置(空串即全局目录),界面据此说明文件会保存到哪里。
+ */
+export interface PendingPlanDto {
+  conversationId: string
+  workspace: string
+  plan: string
+  /** 修订次数:第一版是 0 */
+  revision: number
+  /** 计划落库时刻(毫秒) */
+  createdAt: number
+}
+
+/** 批准计划的结果:执行 run 的句柄与两份文件的落点 */
+export interface ApprovePlanResult {
+  runId: string
+  planPath: string
+  taskPath: string
+}
+
+/**
  * 压缩被计划拒绝的原因(与 agent/compact.ts 的 `CompactReason` 同一支,字面量联合结构相同)。
  * 界面要据此解释「现在按了也省不出空间」,所以它不是错误,是一个需要展示的结论。
  */

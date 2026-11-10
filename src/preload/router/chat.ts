@@ -13,6 +13,12 @@ import type {
   PendingQuestionDto,
   ChatStreamEvent,
   CompactReport,
+  generatePlanDto,
+  revisePlanDto,
+  approvePlanDto,
+  discardPlanDto,
+  PendingPlanDto,
+  ApprovePlanResult,
   IpcResult
 } from '../../main/chat/dto'
 
@@ -71,6 +77,21 @@ export default {
    */
   pendingQuestions: (): Promise<IpcResult<PendingQuestionDto[]>> =>
     ipcRenderer.invoke('chat:pendingQuestions'),
+  /** 让 plan-agent 生成一份计划(需求已是最后一条 user 行);过程同样走 onStream */
+  generatePlan: (dto: generatePlanDto): Promise<IpcResult<{ runId: string }>> =>
+    ipcRenderer.invoke('chat:generatePlan', dto),
+  /** 按修改意见重出一版计划;feedback 由界面先落成一条 user 行再调用 */
+  revisePlan: (dto: revisePlanDto): Promise<IpcResult<{ runId: string }>> =>
+    ipcRenderer.invoke('chat:revisePlan', dto),
+  /** 批准待审批的计划:落盘 + 写 `[计划执行]` 行 + 启动主 run,返回执行 run 的 id */
+  approvePlan: (dto: approvePlanDto): Promise<IpcResult<ApprovePlanResult>> =>
+    ipcRenderer.invoke('chat:approvePlan', dto),
+  /** 放弃待审批的计划:删掉最后一条 user 行之后的 plan-agent 行 */
+  discardPlan: (dto: discardPlanDto): Promise<IpcResult<null>> =>
+    ipcRenderer.invoke('chat:discardPlan', dto),
+  /** 当前待审批的计划;没有就是 null(重载后靠它把卡片填回来) */
+  pendingPlan: (conversationId: string): Promise<IpcResult<PendingPlanDto | null>> =>
+    ipcRenderer.invoke('chat:pendingPlan', conversationId),
   /** 订阅流式事件,返回取消订阅函数 */
   onStream: (callback: (event: ChatStreamEvent) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: ChatStreamEvent): void => callback(payload)

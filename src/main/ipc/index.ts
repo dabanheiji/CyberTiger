@@ -15,7 +15,12 @@ import {
   answerQuestion,
   decideApproval,
   pendingApprovals,
-  pendingQuestions
+  pendingQuestions,
+  generatePlan,
+  revisePlan,
+  approvePlan,
+  discardPlan,
+  pendingPlan
 } from '../chat/controller'
 import {
   getStatus as mcpGetStatus,
@@ -51,6 +56,12 @@ export function registerIpc(): void {
   ipcMain.handle('chat:decideApproval', decideApproval)
   ipcMain.handle('chat:pendingApprovals', pendingApprovals)
   ipcMain.handle('chat:pendingQuestions', pendingQuestions)
+  // 计划模式:生成 / 修订 / 批准 / 放弃 / 重载后拉回待审批计划
+  ipcMain.handle('chat:generatePlan', generatePlan)
+  ipcMain.handle('chat:revisePlan', revisePlan)
+  ipcMain.handle('chat:approvePlan', approvePlan)
+  ipcMain.handle('chat:discardPlan', discardPlan)
+  ipcMain.handle('chat:pendingPlan', pendingPlan)
 
   ipcMain.handle('mcp:getStatus', mcpGetStatus)
   ipcMain.handle('mcp:saveConfig', mcpSaveConfig)

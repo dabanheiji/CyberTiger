@@ -5,6 +5,8 @@ import XMarkdown from '@ant-design/x-markdown'
 import { Avatar, Button, Dropdown, Flex, Popover, Progress, Select, Space, Tag, theme } from 'antd'
 import type { GlobalToken, MenuProps } from 'antd'
 import {
+  CompressOutlined,
+  FileTextOutlined,
   FolderOpenOutlined,
   FolderOutlined,
   RobotOutlined,
@@ -13,7 +15,7 @@ import {
   UserOutlined
 } from '@ant-design/icons'
 import type { Message } from '../../../../main/chat/sql'
-import type { ApprovalOutcome, ApprovalRequest } from '../../../../main/chat/dto'
+import type { ApprovalOutcome, ApprovalRequest, PendingPlanDto } from '../../../../main/chat/dto'
 import type { ModelProvider, ModelRef, PermissionSettings } from '../../../../main/store/types'
 import { contextWindowOf } from '../../../../main/store/modelRef'
 import { budgetFor } from '../../../../main/agent/context'
@@ -21,6 +23,14 @@ import { formatTokens } from '../../../../main/tokens/estimate'
 import { modelKey, parseModelKey } from '../../lib/modelRef'
 import { workspaceLabel } from '../../lib/workspace'
 import { contextUsage, usageLevel, type ContextUsage } from '../../lib/contextUsage'
+import {
+  CHAT_COMMANDS,
+  COMMAND_VALUE_PREFIX,
+  commandBlockedReason,
+  matchesSlashQuery,
+  readChatCommand,
+  readSlashQuery
+} from '../../lib/chatCommands'
 import type {
   AgentStep,
   PendingQuestion,
@@ -32,7 +42,15 @@ import { useSkills } from '../../hooks/useSkills'
 import AgentSteps from '../../components/AgentSteps'
 import AskUserCard from '../../components/AskUserCard'
 import ApprovalCard from '../../components/ApprovalCard'
+import ErrorBoundary from '../../components/ErrorBoundary'
+import PlanApprovalCard from '../../components/PlanApprovalCard'
 import PermissionPicker from './PermissionPicker'
+
+/** 命令在菜单里配哪颗图标;未登记的命令退回一个中性的文档图标 */
+function commandIcon(name: string): React.JSX.Element {
+  if (name === 'compact') return <CompressOutlined />
+  return <FileTextOutlined />
+}
 
 /** 交给气泡 contentRender 的内容 */
 interface UserBubbleContent {
@@ -96,6 +114,17 @@ interface ChatPanelProps {
   onOpenWhitelist: () => void
   /** 占用环里那颗「立即压缩上下文」 */
   onCompact: () => void
+  /** 计划模式:发出去的消息先交给 plan-agent 出计划,而不是直接执行 */
+  planMode: boolean
+  /** 正在等审批的那份计划;有值就渲染计划卡片 */
+  pendingPlan: PendingPlanDto | null
+  /** 用户在菜单里选中 / 敲完整条命令执行某条命令('compact' / 'plan') */
+  onCommand: (name: string) => void
+  /** 关闭输入框上方那颗「计划模式」标签 */
+  onExitPlanMode: () => void
+  onApprovePlan: () => void
+  onRevisePlan: (feedback: string) => void
+  onDiscardPlan: () => void
   onModelChange: (ref: ModelRef) => void
   onOpenSettings: () => void
   /** 点「选择文件夹…」:由父层弹系统对话框 */
@@ -237,6 +266,61 @@ function groupMessages(messages: Message[]): MessageGroup[] {
     skill,
     steps: role === 'user' ? steps : steps.map(finalizeStep)
   }))
+}
+
+/**
+ * 历史气泡项。
+ *
+ * 单独抽出来是为了能 useMemo 住:每次流式增量都重建 content 对象的话,
+ * Bubble 的 React.memo 与它内部的 contentRender 缓存全部失效 ——
+ * 一条回复几十上百个 token,等于把全部历史 Markdown 重新解析几十上百遍,
+ * 提交链也随之被拉长(React 的「嵌套更新」上限就是在这里被撞上的)。
+ */
+function buildHistoryItems(
+  messages: Message[],
+  contextWindow: number | undefined
+): BubbleListProps['items'] {
+  const userIds = new Set(messages.filter((m) => m.role === 'user').map((m) => m.id))
+  return groupMessages(messages).map((g) => {
+    if (userIds.has(g.key)) {
+      return {
+        key: g.key,
+        role: 'user',
+        content: { content: g.steps[0].content, skill: g.skill } as UserBubbleContent
+      }
+    }
+    return {
+      key: g.key,
+      role: 'assistant',
+      content: {
+        steps: g.steps,
+        streaming: false,
+        contextWindow
+      } as AssistantBubbleContent,
+      loading: false,
+      streaming: false
+    }
+  })
+}
+
+/** 进行中那一轮的气泡项:每帧都会换一份,所以它固定排在最后(就是最新那一轮) */
+function buildStreamingItem(
+  streaming: Pick<StreamingRun, 'runId' | 'steps'>,
+  pendingApproval: ApprovalRequest | null,
+  contextWindow: number | undefined
+): BubbleListProps['items'][number] {
+  return {
+    key: streaming.runId,
+    role: 'assistant',
+    content: {
+      steps: streaming.steps,
+      streaming: true,
+      awaitingApprovalCallId: pendingApproval?.callId,
+      contextWindow
+    } as AssistantBubbleContent,
+    loading: streaming.steps.every(isEmptyStep),
+    streaming: true
+  }
 }
 
 interface ContextRingProps {
@@ -386,6 +470,8 @@ function ChatPanel({
   recentWorkspaces,
   pendingQuestion,
   pendingApproval,
+  planMode,
+  pendingPlan,
   permissions,
   onPermissionChange,
   onDecideApproval,
@@ -394,6 +480,11 @@ function ChatPanel({
   onCancel,
   onAnswerQuestion,
   onCompact,
+  onCommand,
+  onExitPlanMode,
+  onApprovePlan,
+  onRevisePlan,
+  onDiscardPlan,
   onModelChange,
   onOpenSettings,
   onPickWorkspace,
@@ -429,49 +520,52 @@ function ChatPanel({
     providers,
     currentRef
   })
-
-  const userIds = new Set(messages.filter((m) => m.role === 'user').map((m) => m.id))
-  const items: BubbleListProps['items'] = groupMessages(messages).map((g) => {
-    if (userIds.has(g.key)) {
-      return {
-        key: g.key,
-        role: 'user',
-        content: { content: g.steps[0].content, skill: g.skill } as UserBubbleContent
-      }
-    }
-    // 进行中的 run 以流式状态为准,比落库数据更新
-    const isStreaming = streaming !== null && streaming.runId === g.runId
-    const steps = isStreaming ? streaming.steps : g.steps
-    return {
-      key: g.key,
-      role: 'assistant',
-      content: {
-        steps,
-        streaming: isStreaming,
-        awaitingApprovalCallId: isStreaming ? pendingApproval?.callId : undefined,
-        contextWindow
-      } as AssistantBubbleContent,
-      loading: isStreaming && steps.every(isEmptyStep),
-      streaming: isStreaming
-    }
-  })
-  // run 刚开始、消息列表尚未包含其占位行时,补一条合成项
-  if (streaming && !items.some((it) => it.key === streaming.runId)) {
-    items.push({
-      key: streaming.runId,
-      role: 'assistant',
-      content: {
-        steps: streaming.steps,
-        streaming: true,
-        awaitingApprovalCallId: pendingApproval?.callId,
-        contextWindow
-      } as AssistantBubbleContent,
-      loading: streaming.steps.every(isEmptyStep),
-      streaming: true
-    })
+  // 每条命令的 disabled 原因;执行前的守卫在 index.tsx 里用同一份函数,两处不会各说一套
+  const commandGate = {
+    hasConversation: !isDraft,
+    hasModel: !!currentRef,
+    sending,
+    compacting
   }
+  // 斜杠后面那一段是过滤词:命令与 skill 共用前缀匹配,敲 /com 时下拉里只剩 compact。
+  // undefined 表示当前不是命令输入(菜单本就关着),此时一条都不隐藏
+  const slashQuery = readSlashQuery(value)
+  const matchedCommands =
+    slashQuery === undefined
+      ? CHAT_COMMANDS
+      : CHAT_COMMANDS.filter((c) => matchesSlashQuery(c.name, slashQuery))
+  const matchedEnabledSkills =
+    slashQuery === undefined
+      ? enabledSkills
+      : enabledSkills.filter((s) => matchesSlashQuery(s.name, slashQuery))
+  const matchedBrokenSkills =
+    slashQuery === undefined
+      ? brokenSkills
+      : brokenSkills.filter((s) => matchesSlashQuery(s.name, slashQuery))
+
+  // 历史气泡只在库里的消息变化时重建 —— 流式增量不碰它们,
+  // 已完成气泡的 content 引用因此保持不变,Bubble 的 memo 才能真的跳过重渲
+  const historyItems = useMemo<BubbleListProps['items']>(
+    () => buildHistoryItems(messages, contextWindow),
+    [messages, contextWindow]
+  )
+  // 进行中的 run 以流式状态为准,比落库数据更新;它替换掉库里那一组(如果有),并排到最后
+  const items = useMemo<BubbleListProps['items']>(() => {
+    if (!streaming) return historyItems
+    const rest = historyItems.filter((item) => item.key !== streaming.runId)
+    return [...rest, buildStreamingItem(streaming, pendingApproval, contextWindow)]
+  }, [historyItems, streaming, pendingApproval, contextWindow])
 
   const handleSubmit = (text: string): void => {
+    // 命令在菜单选中时已经执行过;这里兜的是「点发送按钮」那条路 ——
+    // 否则 /compact 会作为一条普通消息发给模型
+    const command = readChatCommand(text)
+    if (command) {
+      setValue('')
+      setActiveSkill(null)
+      onCommand(command.name)
+      return
+    }
     onSend(text, activeSkill ?? undefined)
     // Sender 的 onSubmit 不会清空输入框,需要手动重置受控值
     setValue('')
@@ -502,10 +596,31 @@ function ChatPanel({
             />
           </div>
         ) : (
-          <Bubble.List style={{ height: '100%' }} items={items} role={roles} autoScroll />
+          // 列表这一层单独兜底:消息渲染炸了不该连输入框、审批卡片和侧栏一起带走。
+          // runId 变化(停止、换会话、下一轮)时自动复位,用户不必先点重试
+          <ErrorBoundary
+            title="消息列表渲染出错"
+            subTitle="这一轮回复的渲染出了错，输入框仍然可用；可以重试，或先停止这一轮。"
+            resetKeys={[streaming?.runId ?? '']}
+          >
+            <Bubble.List style={{ height: '100%' }} items={items} role={roles} autoScroll />
+          </ErrorBoundary>
         )}
       </div>
       <div style={{ padding: `0 ${token.padding}px ${token.padding}px` }}>
+        {/* 计划卡片与提问 / 审批同一条位置:这一轮正等用户决定要不要按这份计划执行 */}
+        {pendingPlan && (
+          <PlanApprovalCard
+            plan={pendingPlan.plan}
+            revision={pendingPlan.revision}
+            workspace={workspace}
+            // 规划修订、批准后的执行 run 都算「进行中」:整张卡片这时不能再按
+            busy={sending}
+            onApprove={onApprovePlan}
+            onRevise={onRevisePlan}
+            onDiscard={onDiscardPlan}
+          />
+        )}
         {/* 提问卡片压住输入区:这一轮本来就停在等用户的选择 */}
         {pendingQuestion && (
           <AskUserCard
@@ -526,6 +641,15 @@ function ChatPanel({
             onOpenWhitelist={onOpenWhitelist}
           />
         )}
+        {/* 计划模式是一档持续状态:标在输入区上方,关闭即退出。它不随发送清空 ——
+            用户可能连续两次让同一个会话先出计划 */}
+        {planMode && (
+          <div style={{ marginBottom: token.marginXS }}>
+            <Tag icon={<FileTextOutlined />} color="blue" closable onClose={onExitPlanMode}>
+              计划模式:先出计划,审批后再执行
+            </Tag>
+          </div>
+        )}
         {/* 输入 / 时弹出 skill 列表;选中后作为标签显示在输入框内 */}
         <Suggestion
           block
@@ -535,7 +659,35 @@ function ChatPanel({
           // 重置为 0 让弹层宽度跟随输入框,随窗口自适应
           popupStyle={{ minWidth: 0 }}
           items={[
-            ...enabledSkills.map((s) => ({
+            // 命令排在最前:它们是固定几条,用户敲 / 就是要找它们;skill 数量不定、放在后面
+            ...matchedCommands.map((c) => {
+              const blocked = commandBlockedReason(c.name, commandGate)
+              return {
+                value: `${COMMAND_VALUE_PREFIX}${c.name}`,
+                // 被禁用时原因写在行尾,用户不必按下去才知道为什么没反应
+                disabled: !!blocked,
+                label: (
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    /{c.name}：{c.description}
+                  </span>
+                ),
+                icon: commandIcon(c.name),
+                extra: blocked ? (
+                  <span style={{ color: token.colorTextTertiary, whiteSpace: 'nowrap' }}>
+                    {blocked}
+                  </span>
+                ) : undefined
+              }
+            }),
+            ...matchedEnabledSkills.map((s) => ({
               value: s.name,
               // 名称：描述 融合为单个 label 项,配合 flex:1 + ellipsis 铺满弹层宽度
               label: (
@@ -558,7 +710,7 @@ function ChatPanel({
               ),
               icon: <ThunderboltOutlined />
             })),
-            ...brokenSkills.map((s) => ({
+            ...matchedBrokenSkills.map((s) => ({
               value: s.name,
               disabled: true,
               label: (
@@ -581,8 +733,25 @@ function ChatPanel({
               icon: <ThunderboltOutlined />
             }))
           ]}
-          onSelect={(name) => {
-            setActiveSkill(name)
+          onSelect={(value) => {
+            // 命令选中即执行:Suggestion 的 Enter 只做导航不选中,再走一遍「插入文本再回车」
+            // 就得额外维护一份待执行状态
+            if (value.startsWith(COMMAND_VALUE_PREFIX)) {
+              const name = value.slice(COMMAND_VALUE_PREFIX.length)
+              setValue('')
+              setActiveSkill(null)
+              onCommand(name)
+              // 命令执行完输入框要接着能用;此时可能刚从 slot 模式切回来,焦点不会自己回来
+              requestAnimationFrame(() => {
+                const el = document.querySelector<HTMLTextAreaElement>('.ant-sender textarea')
+                if (el) {
+                  el.focus()
+                  el.setSelectionRange(el.value.length, el.value.length)
+                }
+              })
+              return
+            }
+            setActiveSkill(value)
             setValue('')
             // 选择后自动聚焦输入框,便于直接输入参数;此时组件已切到 slot 模式(contenteditable)
             requestAnimationFrame(() => {
@@ -620,19 +789,40 @@ function ChatPanel({
                     }
                   })
                 }
-                // 只在输入框内容恰好是 "/" 开头且不含空格时弹出,避免正文里的斜杠误触发
-                const slash = next.startsWith('/') && !next.includes(' ')
+                // 只在输入框内容恰好是 "/" 开头且不含空白时弹出,避免正文里的斜杠误触发;
+                // 斜杠后面那一段是过滤词,一条都不命中时收起菜单 —— 空面板会让人以为它坏了
+                const nextQuery = readSlashQuery(next)
+                const hasMatch =
+                  nextQuery !== undefined &&
+                  (CHAT_COMMANDS.some((c) => matchesSlashQuery(c.name, nextQuery)) ||
+                    enabledSkills.some((s) => matchesSlashQuery(s.name, nextQuery)) ||
+                    brokenSkills.some((s) => matchesSlashQuery(s.name, nextQuery)))
                 // 面板每次从关到开都重拉一次:项目目录没有 watcher,模型刚写的 skill 靠它现身。
-                // 用 open 判「刚打开」而不是只判 slash,否则连续敲 /w 会每键拉一次
-                if (slash && !open) setSkillsEpoch((n) => n + 1)
+                // 用 open 判「刚打开」而不是只判 hasMatch,否则连续敲 /w 会每键拉一次
+                if (hasMatch && !open) setSkillsEpoch((n) => n + 1)
                 // 只有坏条目时也允许打开:那一行灰色项就是「为什么这里没有 skill」的答案
-                if (slash && skills.length > 0) {
+                if (hasMatch) {
                   onTrigger()
                 } else {
                   onTrigger(false)
                 }
               }}
-              onKeyDown={onKeyDown}
+              onKeyDown={(e) => {
+                // 输入法选词那一次回车不算提交
+                if (e.nativeEvent.isComposing) return
+                // 菜单打开时 Suggestion 会吞掉 Enter(只做高亮导航),所以「敲完整条命令再回车」
+                // 必须在这里拦;返回 false 才能让 Sender 也跳过发送
+                if (e.key === 'Enter' && !e.shiftKey && readChatCommand(value)) {
+                  e.preventDefault()
+                  onTrigger(false)
+                  const command = readChatCommand(value)
+                  setValue('')
+                  setActiveSkill(null)
+                  if (command) onCommand(command.name)
+                  return false
+                }
+                return onKeyDown(e)
+              }}
               onSubmit={handleSubmit}
               // loading 时发送按钮变为停止按钮,点击触发 onCancel
               loading={sending}
@@ -646,11 +836,7 @@ function ChatPanel({
                     }
                   : undefined
               }
-              placeholder={
-                enabledSkills.length > 0
-                  ? '输入消息,Enter 发送,Shift + Enter 换行,/ 选择 skill'
-                  : '输入消息,Enter 发送,Shift + Enter 换行'
-              }
+              placeholder="输入消息,Enter 发送,Shift + Enter 换行,/ 选择命令或 skill"
               autoSize={{ minRows: 1, maxRows: 6 }}
               // 发送按钮移到底栏,与模型选择器同一行
               suffix={false}

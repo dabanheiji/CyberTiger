@@ -11,6 +11,7 @@ import type {
 } from '../../main/store/types'
 import { useSystemTheme } from './hooks/useSystemTheme'
 import { buildTheme, defaultAccent, focusRing, selectionTint } from './theme'
+import ErrorBoundary from './components/ErrorBoundary'
 import ChatPage from './pages/chat'
 import ReportPage from './pages/report'
 import SettingsPage from './pages/settings'
@@ -40,7 +41,13 @@ function Routes(props: {
   return (
     <>
       <div style={{ height: '100%', display: onSettings || onReport ? 'none' : undefined }}>
-        <ChatPage permissions={props.permissions} onPermissionsChange={props.onPermissionsChange} />
+        {/* 聊天页是常驻的:它在后台流式渲染时炸了,不该把设置页 / 报表页一起带走 */}
+        <ErrorBoundary title="聊天页渲染出错" resetKeys={[pathname]}>
+          <ChatPage
+            permissions={props.permissions}
+            onPermissionsChange={props.onPermissionsChange}
+          />
+        </ErrorBoundary>
       </div>
       {onSettings && <SettingsPage {...props} />}
       {onReport && <ReportPage />}
@@ -88,14 +95,20 @@ function App(): React.JSX.Element {
     <XProvider locale={{ ...antdZhCN, ...xZhCN }} theme={themeConfig}>
       <AntdApp style={{ height: '100%' }}>
         <HashRouter>
-          <Routes
-            appearance={appearance}
-            onAppearanceChange={setAppearance}
-            permissions={permissions}
-            onPermissionsChange={setPermissions}
-            sandbox={sandbox}
-            onSandboxChange={setSandbox}
-          />
+          {/* 最后一道:任何一处没被内层接住的渲染错误,至少换来一页说明与两条出路,而不是空白窗口 */}
+          <ErrorBoundary
+            title="页面渲染出错"
+            subTitle="应用界面在渲染时出错了。可以重试；如果重试无效，重新加载窗口即可恢复。"
+          >
+            <Routes
+              appearance={appearance}
+              onAppearanceChange={setAppearance}
+              permissions={permissions}
+              onPermissionsChange={setPermissions}
+              sandbox={sandbox}
+              onSandboxChange={setSandbox}
+            />
+          </ErrorBoundary>
         </HashRouter>
       </AntdApp>
     </XProvider>

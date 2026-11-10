@@ -70,14 +70,17 @@ const BACKGROUND_JOB = 'background_job'
  *
  * - 前三个不碰本机状态;
  * - `ask_user` 本来就停在用户身上(那张卡片就是它);
- * - `task` 不直接动手,它派出的子 run 里每一次调用各自过闸门。
+ * - `task` 不直接动手,它派出的子 run 里每一次调用各自过闸门;
+ * - `plan_tasks` 只写审批时已经确定的那一个任务文件(路径不是模型给的),而且 jail
+ *   开着时仍走 `confine` —— 每勾一次任务就弹一张卡片只会让执行过程被审批淹没。
  */
 const OUT_OF_SURFACE = new Set([
   'get_current_time',
   'load_skill',
   'read_skill_file',
   'ask_user',
-  'task'
+  'task',
+  'plan_tasks'
 ])
 
 function stringArg(value: unknown): string {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { App, theme } from 'antd'
 import type { Conversation, Message } from '../../../../main/chat/sql'
-import type { ApprovalOutcome } from '../../../../main/chat/dto'
+import type { ApprovalOutcome, PendingPlanDto } from '../../../../main/chat/dto'
 import type {
   AppSettings,
   ModelProvider,
@@ -11,9 +11,11 @@ import type {
 } from '../../../../main/store/types'
 import { normalizeRef } from '../../../../main/store/modelRef'
 import { compactResultLine } from '../../lib/contextUsage'
+import { commandBlockedReason } from '../../lib/chatCommands'
 import { pushRecent } from '../../lib/workspace'
 import Sidebar from './Sidebar'
 import ChatPanel from './ChatPanel'
+import ErrorBoundary from '../../components/ErrorBoundary'
 import { useAgentStream } from '../../hooks/useAgentStream'
 
 interface ChatPageProps {
@@ -46,6 +48,13 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
   const [currentRef, setCurrentRef] = useState<ModelRef | undefined>()
   // 手动压缩在等 IPC 返回:按钮转圈,同时避免连点起两次压缩
   const [compacting, setCompacting] = useState(false)
+  // 与 compacting 同义,但挡的是同帧重复触发 —— 回车连击、菜单点击与回车同时到达时,
+  // state 还没提交,只看 compacting 会让两次都放过去
+  const compactingRef = useRef(false)
+  /** 计划模式:消息先交给 plan-agent 出计划,审批后才真正执行 */
+  const [planMode, setPlanMode] = useState(false)
+  /** 当前会话待审批的那份计划;从库里派生,批准 / 放弃 / 发下一句后自动消失 */
+  const [pendingPlan, setPendingPlan] = useState<PendingPlanDto | null>(null)
   /** 草稿态待用的工作空间:首条消息建会话时由主进程抄进那一行 */
   const [defaultWorkspace, setDefaultWorkspace] = useState('')
   /** 最近用过的工作空间,最新在前;跨会话共享,所以放在设置里而不是会话行上 */
@@ -92,16 +101,31 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
     [message]
   )
 
+  /**
+   * 重读当前会话待审批的计划。
+   * 计划不另存状态:它就是「最后一条 user 行之后、plan-agent 落的那条纯正文 assistant 行」,
+   * 所以生成结束、批准、放弃、发下一句之后都靠这一次派生把卡片对齐。
+   */
+  const refreshPendingPlan = useCallback(async (conversationId: string): Promise<void> => {
+    if (!conversationId) return
+    const res = await window.api.chat.pendingPlan(conversationId)
+    // 请求期间用户已切走:丢弃过期结果
+    if (activeIdRef.current !== conversationId) return
+    if (res.success) setPendingPlan(res.data)
+  }, [])
+
   // 回复结束后:当前会话则重拉消息拿到落库内容,并刷新会话排序
   const finishReply = useCallback(
     async (conversationId: string): Promise<void> => {
       if (activeIdRef.current === conversationId) {
         await loadMessages(conversationId)
+        // 规划 run 的最终回答就是待审批的计划;执行 run 结束后也可能还剩旧草稿需要对齐
+        await refreshPendingPlan(conversationId)
       }
       await refreshConversations()
       setSending(false)
     },
-    [loadMessages, refreshConversations]
+    [loadMessages, refreshPendingPlan, refreshConversations]
   )
 
   const {
@@ -109,6 +133,9 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
     detachedApproval,
     detachedQuestion,
     start: startReply,
+    startPlan,
+    startRevision,
+    track,
     abort: abortReply,
     refreshApprovals,
     refreshQuestions
@@ -129,10 +156,23 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
     return loadMessages(conversationId)
   }
 
+  /**
+   * 用户从侧栏切换会话:计划模式与待审批卡片都只属于原来那条会话,换过去就复位。
+   * 新建会话(including 首条消息建出来的那条)走 `selectConversation` 本身,不复位 ——
+   * 计划模式正是从「一句需求 + 新会话」开始的。
+   */
+  const handleSelectConversation = (conversationId: string): void => {
+    setPlanMode(false)
+    setPendingPlan(null)
+    void selectConversation(conversationId)
+  }
+
   const newConversation = (): void => {
     activeIdRef.current = null
     setActiveId(null)
     setMessages([])
+    setPlanMode(false)
+    setPendingPlan(null)
   }
 
   // 读取设置里的模型列表和当前模型,返回完整设置供调用方使用
@@ -251,6 +291,35 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
       ? defaultWorkspace
       : (conversations.find((c) => c.id === activeId)?.workspace ?? '')
 
+  /**
+   * 把一条用户消息落库(草稿态先建会话),返回会话 id;失败时已经报过错了,返回 null。
+   * 普通回复与计划请求共用这一段:两条路只是「落库之后发给谁」不同。
+   */
+  const persistUserMessage = async (text: string, skillName?: string): Promise<string | null> => {
+    const conversationId = activeIdRef.current
+    if (conversationId === null) {
+      const res = await window.api.chat.sendFirstMessage({ content: text, skill: skillName })
+      if (!res.success) {
+        message.error(res.msg)
+        return null
+      }
+      await refreshConversations()
+      await selectConversation(res.data.conversationId)
+      return res.data.conversationId
+    }
+    const res = await window.api.chat.sendMessage({
+      conversationId,
+      content: text,
+      skill: skillName
+    })
+    if (!res.success) {
+      message.error(res.msg)
+      return null
+    }
+    await Promise.all([loadMessages(conversationId), refreshConversations()])
+    return conversationId
+  }
+
   const handleSend = async (content: string, skillName?: string): Promise<void> => {
     const text = content.trim()
     if (!text || sending) return
@@ -262,32 +331,20 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
     setSending(true)
     try {
       // 1. 用户消息落库并刷新列表
-      let conversationId = activeIdRef.current
+      const conversationId = await persistUserMessage(text, skillName)
       if (conversationId === null) {
-        const res = await window.api.chat.sendFirstMessage({ content: text, skill: skillName })
-        if (!res.success) {
-          message.error(res.msg)
-          setSending(false)
-          return
-        }
-        conversationId = res.data.conversationId
-        await refreshConversations()
-        await selectConversation(conversationId)
-      } else {
-        const res = await window.api.chat.sendMessage({
-          conversationId,
-          content: text,
-          skill: skillName
-        })
-        if (!res.success) {
-          message.error(res.msg)
-          setSending(false)
-          return
-        }
-        await Promise.all([loadMessages(conversationId), refreshConversations()])
+        setSending(false)
+        return
       }
-      // 2. 触发模型回复;成功后 sending 由流结束事件解除
-      const started = await startReply(conversationId, currentRef)
+      // 2. 计划模式下这次消息交给 plan-agent 出计划;否则照常触发主 Agent 回复。
+      // 成功后 sending 由流结束事件解除
+      if (planMode) {
+        // 新需求让旧草稿失效:不必等派生刷新,先把卡片收掉
+        setPendingPlan(null)
+      }
+      const started = planMode
+        ? await startPlan(conversationId, currentRef)
+        : await startReply(conversationId, currentRef)
       if (!started.success) {
         message.error(started.msg)
         setSending(false)
@@ -391,6 +448,19 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
   useEffect(() => {
     void refreshApprovals(activeId ?? '')
     void refreshQuestions(activeId ?? '')
+    if (!activeId) return
+    // 待审批计划与审批同一形状:重载 / 切会话之后靠一次派生把卡片填回来。
+    // 切换会话时的清空在 `handleSelectConversation` / `newConversation` 里做;这里走
+    // `.then` 回调而不是直接调 `refreshPendingPlan` —— effect 体内同步触发 setState
+    // 会招来 lint 的级联渲染告警,而这次读取本来就是异步的。
+    let cancelled = false
+    void window.api.chat.pendingPlan(activeId).then((res) => {
+      if (cancelled || activeIdRef.current !== activeId) return
+      if (res.success) setPendingPlan(res.data)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [activeId, refreshApprovals, refreshQuestions])
 
   /**
@@ -400,7 +470,20 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
    * 知道为什么没压,静默返回等于什么都没发生。结论只在这一句提示里说,不占用环。
    */
   const handleCompact = async (): Promise<void> => {
-    if (activeId === null || !currentRef || compacting) return
+    // 压缩的两条入口(占用环按钮与 /compact)共用这一份理由,菜单里写的是同一句
+    const reason = commandBlockedReason('compact', {
+      hasConversation: activeId !== null,
+      hasModel: !!currentRef,
+      sending,
+      compacting: compactingRef.current
+    })
+    if (reason) {
+      message.warning(reason)
+      return
+    }
+    // 上面那道守卫已经排除这两种情况,这里只为类型收窄
+    if (activeId === null || !currentRef) return
+    compactingRef.current = true
     setCompacting(true)
     try {
       const res = await window.api.chat.compactContext({
@@ -420,8 +503,109 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err))
     } finally {
+      compactingRef.current = false
       setCompacting(false)
     }
+  }
+
+  /**
+   * `/` 菜单里选中或敲完整条命令后的统一入口。
+   * 门禁与菜单的 disabled 说明共用 `commandBlockedReason`,两处不会各说一套。
+   */
+  const handleCommand = (name: string): void => {
+    const reason = commandBlockedReason(name, {
+      hasConversation: activeId !== null,
+      hasModel: !!currentRef,
+      sending,
+      compacting: compactingRef.current
+    })
+    if (reason) {
+      message.warning(reason)
+      return
+    }
+    if (name === 'compact') {
+      void handleCompact()
+      return
+    }
+    if (name === 'plan') {
+      const next = !planMode
+      setPlanMode(next)
+      message.info(
+        next ? '已进入计划模式:消息先交给 plan-agent 生成计划,批准后才开始改代码' : '已退出计划模式'
+      )
+    }
+  }
+
+  /**
+   * 批准待审批的计划:落盘 + 启动执行 run。
+   *
+   * 返回的 runId 交给 `track` 接管这一轮的流式状态 —— 与其它 run 一样,
+   * 主进程那边的事件不带任何「这是计划执行」的特殊标记,只是同一套事件。
+   */
+  const handleApprovePlan = async (): Promise<void> => {
+    const conversationId = activeIdRef.current
+    if (conversationId === null || !currentRef) return
+    setSending(true)
+    try {
+      const res = await window.api.chat.approvePlan({
+        conversationId,
+        providerId: currentRef.providerId,
+        model: currentRef.model
+      })
+      if (!res.success) {
+        message.error(res.msg)
+        setSending(false)
+        return
+      }
+      setPendingPlan(null)
+      setPlanMode(false)
+      // 先接管流式状态,再重拉消息:重拉期间已经有步骤事件在路上了
+      track(conversationId, res.data.runId)
+      await loadMessages(conversationId)
+      message.success(`计划已保存:${res.data.planPath}`)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err))
+      setSending(false)
+    }
+  }
+
+  /** 按修改意见重出计划:意见先落成一条 user 行,再让 plan-agent 基于上一版修订 */
+  const handleRevisePlan = async (feedback: string): Promise<void> => {
+    const conversationId = activeIdRef.current
+    if (conversationId === null || !currentRef) return
+    const text = feedback.trim()
+    if (!text) return
+    setSending(true)
+    try {
+      const saved = await window.api.chat.sendMessage({ conversationId, content: text })
+      if (!saved.success) {
+        message.error(saved.msg)
+        setSending(false)
+        return
+      }
+      await loadMessages(conversationId)
+      const started = await startRevision(conversationId, currentRef, text)
+      if (!started.success) {
+        message.error(started.msg)
+        setSending(false)
+      }
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err))
+      setSending(false)
+    }
+  }
+
+  /** 放弃计划:聊天里的草稿行一起删掉;计划模式保留,用户可能想重来一次 */
+  const handleDiscardPlan = async (): Promise<void> => {
+    const conversationId = activeIdRef.current
+    if (conversationId === null) return
+    const res = await window.api.chat.discardPlan({ conversationId })
+    if (!res.success) {
+      message.error(res.msg)
+      return
+    }
+    setPendingPlan(null)
+    await loadMessages(conversationId)
   }
 
   const handleRename = async (conversationId: string, title: string): Promise<void> => {
@@ -468,7 +652,7 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
       <Sidebar
         conversations={conversations}
         activeId={activeId}
-        onSelect={selectConversation}
+        onSelect={handleSelectConversation}
         onNew={newConversation}
         onNewInWorkspace={(dir) => void newConversationInWorkspace(dir)}
         onRename={handleRename}
@@ -476,32 +660,49 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
         onOpenSettings={openSettings}
         onOpenReport={openReport}
       />
-      <ChatPanel
-        messages={messages}
-        streaming={shownRun}
-        pendingQuestion={shownQuestion}
-        pendingApproval={shownApproval}
-        permissions={permissions}
-        isDraft={activeId === null}
-        sending={sending}
-        providers={providers}
-        currentRef={currentRef}
-        compacting={compacting}
-        workspace={activeWorkspace}
-        recentWorkspaces={recentWorkspaces}
-        onSend={handleSend}
-        onCancel={handleCancel}
-        onAnswerQuestion={(answers) => void handleAnswerQuestion(answers)}
-        onPermissionChange={(next) => void handlePermissionChange(next)}
-        onDecideApproval={(outcome, reason) => void handleDecideApproval(outcome, reason)}
-        onOpenWhitelist={openPermissionSettings}
-        onCompact={() => void handleCompact()}
-        onModelChange={handleModelChange}
-        onOpenSettings={openSettings}
-        onPickWorkspace={() => void handlePickWorkspace()}
-        onSelectWorkspace={(dir) => void applyWorkspace(dir)}
-        onClearWorkspace={() => void handleClearWorkspace()}
-      />
+      {/* 对话区整体兜底:它自己渲染炸了也不该把侧栏(换会话、新建对话)一起带走。
+          切到别的会话时 activeId 变化会自动复位;点「重试」顺带重拉一次消息 */}
+      <ErrorBoundary
+        title="对话区渲染出错"
+        resetKeys={[activeId]}
+        onReset={() => {
+          if (activeId) void loadMessages(activeId)
+        }}
+      >
+        <ChatPanel
+          messages={messages}
+          streaming={shownRun}
+          pendingQuestion={shownQuestion}
+          pendingApproval={shownApproval}
+          permissions={permissions}
+          isDraft={activeId === null}
+          sending={sending}
+          providers={providers}
+          currentRef={currentRef}
+          compacting={compacting}
+          workspace={activeWorkspace}
+          recentWorkspaces={recentWorkspaces}
+          onSend={handleSend}
+          onCancel={handleCancel}
+          onAnswerQuestion={(answers) => void handleAnswerQuestion(answers)}
+          onPermissionChange={(next) => void handlePermissionChange(next)}
+          onDecideApproval={(outcome, reason) => void handleDecideApproval(outcome, reason)}
+          onOpenWhitelist={openPermissionSettings}
+          onCompact={() => void handleCompact()}
+          planMode={planMode}
+          pendingPlan={pendingPlan}
+          onCommand={handleCommand}
+          onExitPlanMode={() => setPlanMode(false)}
+          onApprovePlan={() => void handleApprovePlan()}
+          onRevisePlan={(feedback) => void handleRevisePlan(feedback)}
+          onDiscardPlan={() => void handleDiscardPlan()}
+          onModelChange={handleModelChange}
+          onOpenSettings={openSettings}
+          onPickWorkspace={() => void handlePickWorkspace()}
+          onSelectWorkspace={(dir) => void applyWorkspace(dir)}
+          onClearWorkspace={() => void handleClearWorkspace()}
+        />
+      </ErrorBoundary>
     </div>
   )
 }

@@ -504,3 +504,85 @@ describe('工作空间列', () => {
     expect(readWorkspace('nope')).toBeUndefined()
   })
 })
+
+describe('清理计划草稿', () => {
+  /** 一条主 Agent 的对话,其后是 plan-agent 的若干草稿行 */
+  function seedPlanDrafts(): void {
+    addConversation('c1')
+    db.prepare(chatSql.messages.add).run('u1', 'c1', 'user', '帮我设计一版方案', '')
+    addStep('a1', scope({ agent: 'plan-agent', runId: 'p1' }))
+    updateStep('a1', '第一版计划', '', '[]')
+    addStep('a2', scope({ agent: 'plan-agent', runId: 'p1' }))
+    updateStep('a2', '第二版计划', '', '[]')
+  }
+
+  it('只删最后一条 user 行之后的 plan-agent 行', () => {
+    seedPlanDrafts()
+
+    db.prepare(chatSql.messages.removePlanDrafts).run('c1', 'c1')
+
+    expect(rows(chatSql.messages.list, 'c1').map((r) => r.id)).toEqual(['u1'])
+  })
+
+  it('更早历史里的 plan-agent 行原样保留', () => {
+    addConversation('c1')
+    // 上一轮计划已经批准执行:它前面有一条 [计划执行] user 行
+    db.prepare(chatSql.messages.add).run('u1', 'c1', 'user', '第一轮需求', '')
+    addStep('old', scope({ agent: 'plan-agent', runId: 'p0' }))
+    updateStep('old', '旧计划', '', '[]')
+    db.prepare(chatSql.messages.add).run('u2', 'c1', 'user', '[计划执行] 按旧计划来', '')
+    addStep('a1', scope({ runId: 'r1' }))
+    updateStep('a1', '做完了', '', '[]')
+    // 这一轮的新草稿
+    db.prepare(chatSql.messages.add).run('u3', 'c1', 'user', '第二轮需求', '')
+    addStep('new', scope({ agent: 'plan-agent', runId: 'p2' }))
+    updateStep('new', '新计划', '', '[]')
+
+    db.prepare(chatSql.messages.removePlanDrafts).run('c1', 'c1')
+
+    expect(rows(chatSql.messages.list, 'c1').map((r) => r.id)).toEqual([
+      'u1',
+      'old',
+      'u2',
+      'a1',
+      'u3'
+    ])
+  })
+
+  it('连带 plan-agent 的工具行一起删掉(同一次 run 不留孤儿)', () => {
+    addConversation('c1')
+    db.prepare(chatSql.messages.add).run('u1', 'c1', 'user', '需求', '')
+    const planScope = scope({ agent: 'plan-agent', runId: 'p1' })
+    addStep('a1', planScope)
+    updateStep('a1', '', '', JSON.stringify([{ id: 't1', name: 'read_file', arguments: '{}' }]))
+    addTool('t1', planScope, 't1', '文件内容')
+    addStep('a2', planScope)
+    updateStep('a2', '计划正文', '', '[]')
+
+    db.prepare(chatSql.messages.removePlanDrafts).run('c1', 'c1')
+
+    expect(rows(chatSql.messages.list, 'c1').map((r) => r.id)).toEqual(['u1'])
+  })
+
+  it('一条 user 行都没有时删光所有 plan-agent 行', () => {
+    addConversation('c1')
+    addStep('a1', scope({ agent: 'plan-agent' }))
+    updateStep('a1', '孤立草稿', '', '[]')
+
+    db.prepare(chatSql.messages.removePlanDrafts).run('c1', 'c1')
+
+    expect(rows(chatSql.messages.list, 'c1')).toEqual([])
+  })
+
+  it('别的会话里的草稿不受影响', () => {
+    seedPlanDrafts()
+    addConversation('c2')
+    db.prepare(chatSql.messages.add).run('v1', 'c2', 'user', '另一个会话', '')
+    addStep('va', scope({ conversationId: 'c2', agent: 'plan-agent' }))
+    updateStep('va', '别人的草稿', '', '[]')
+
+    db.prepare(chatSql.messages.removePlanDrafts).run('c1', 'c1')
+
+    expect(rows(chatSql.messages.list, 'c2').map((r) => r.id)).toEqual(['v1', 'va'])
+  })
+})

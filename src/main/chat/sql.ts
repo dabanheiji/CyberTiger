@@ -111,6 +111,15 @@ export const chatSql = {
     addToolMessage:
       "INSERT INTO messages (id, conversation_id, role, content, tool_call_id, run_id, agent, parent_call_id, depth) VALUES (?, ?, 'tool', ?, ?, ?, ?, ?, ?)",
     removeById: 'DELETE FROM messages WHERE id = ?',
-    removeByConversation: 'DELETE FROM messages WHERE conversation_id = ?'
+    removeByConversation: 'DELETE FROM messages WHERE conversation_id = ?',
+    /**
+     * 放弃计划:删掉最后一条 user 行之后、由 plan-agent 写下的全部行。
+     *
+     * 计划 run 的 tool 行也带同一个 agent,所以它们和草稿一起消失 ——
+     * 只删草稿会留下没有响应的 tool_calls。更早的历史不动:那是用户真正说过的话。
+     * 两个参数都是会话 id(内层子查询找最后一条 user 行)。
+     */
+    removePlanDrafts:
+      "DELETE FROM messages WHERE conversation_id = ? AND agent = 'plan-agent' AND rowid > COALESCE((SELECT rowid FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY rowid DESC LIMIT 1), -1)"
   }
 }

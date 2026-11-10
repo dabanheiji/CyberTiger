@@ -14,7 +14,12 @@ import {
   pendingApprovals as listPendingApprovals,
   pendingQuestions as listPendingQuestions,
   hasActiveWork,
-  setConversationWorkspace
+  setConversationWorkspace,
+  generatePlan as generatePlanService,
+  revisePlan as revisePlanService,
+  approvePlan as approvePlanService,
+  discardPlan as discardPlanService,
+  pendingPlan as pendingPlanService
 } from './service'
 import type {
   createFirstMessageDto,
@@ -30,6 +35,12 @@ import type {
   PendingQuestionDto,
   ChatStreamEvent,
   CompactReport,
+  generatePlanDto,
+  revisePlanDto,
+  approvePlanDto,
+  discardPlanDto,
+  PendingPlanDto,
+  ApprovePlanResult,
   IpcResult
 } from './dto'
 import type { Conversation, Message } from './sql'
@@ -89,14 +100,18 @@ export function removeConversation(
   })
 }
 
+/** 把事件推给发起这次调用的渲染层;窗口已关闭时不再推送,但落库照常完成 */
+function streamEmitter(e: IpcMainInvokeEvent): (event: ChatStreamEvent) => void {
+  return (event: ChatStreamEvent): void => {
+    if (!e.sender.isDestroyed()) e.sender.send('chat:stream', event)
+  }
+}
+
 export function generateReply(
   e: IpcMainInvokeEvent,
   dto: generateReplyDto
 ): IpcResult<{ runId: string }> {
-  const emit = (event: ChatStreamEvent): void => {
-    // 窗口已关闭时不再推送,但落库照常完成
-    if (!e.sender.isDestroyed()) e.sender.send('chat:stream', event)
-  }
+  const emit = streamEmitter(e)
   /**
    * 审批在等而窗口没在前台:来一条系统通知并把窗口叫回来。
    * 用户可能在别的应用里,而这一整轮正停在他身上 —— 没有这一步,审批看起来就像 Agent 卡死,
@@ -215,4 +230,58 @@ export function pendingApprovals(): IpcResult<PendingApprovalDto[]> {
  */
 export function pendingQuestions(): IpcResult<PendingQuestionDto[]> {
   return run(() => listPendingQuestions())
+}
+
+/**
+ * 让 plan-agent 生成一份计划。
+ *
+ * 与 `generateReply` 同一形状:同步返回 runId,规划过程在后台跑并经 `chat:stream`
+ * 推给渲染层(它流式显示读了哪些文件、问了什么)。需求本身已经是一条 user 行,
+ * 所以这里没有 content 参数。
+ */
+export function generatePlan(
+  e: IpcMainInvokeEvent,
+  dto: generatePlanDto
+): IpcResult<{ runId: string }> {
+  return run(() => ({ runId: generatePlanService(dto, streamEmitter(e)) }))
+}
+
+/** 按用户的修改意见重出一版计划;修改意见已由界面落成 user 行 */
+export function revisePlan(
+  e: IpcMainInvokeEvent,
+  dto: revisePlanDto
+): IpcResult<{ runId: string }> {
+  return run(() => ({ runId: revisePlanService(dto, streamEmitter(e)) }))
+}
+
+/**
+ * 批准待审批的计划:落盘计划文件、写一条 `[计划执行]` user 行、启动主 run。
+ *
+ * 返回值里有本次执行 run 的 id,渲染层用它接管这一轮的流式状态 ——
+ * 与 `generateReply` 返回 runId 是同一条理由。
+ */
+export function approvePlan(
+  e: IpcMainInvokeEvent,
+  dto: approvePlanDto
+): IpcResult<ApprovePlanResult> {
+  return run(() => approvePlanService(dto, streamEmitter(e)))
+}
+
+/** 放弃待审批的计划:删掉最后一条 user 行之后的 plan-agent 行 */
+export function discardPlan(_e: IpcMainInvokeEvent, dto: discardPlanDto): IpcResult<null> {
+  return run(() => {
+    discardPlanService(dto)
+    return null
+  })
+}
+
+/**
+ * 当前待审批的计划;没有就是 null。
+ * 与 `pendingApprovals` 同一条路:重载后流式状态归零,卡片靠这一次拉取补回来。
+ */
+export function pendingPlan(
+  _e: IpcMainInvokeEvent,
+  conversationId: string
+): IpcResult<PendingPlanDto | null> {
+  return run(() => pendingPlanService(conversationId))
 }

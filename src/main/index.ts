@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme } from 'electron'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { registerIpc } from './ipc'
@@ -11,6 +12,7 @@ import { initAgents } from './agents/controller'
 import { initHooks } from './hooks/controller'
 import { migrateSettings } from './store/migrate'
 import { store } from './store'
+import { externalLinkFor, isAppDocument } from './links'
 import { applyThemeSource } from './appearance'
 import { engineProbe } from './sandbox/preflight'
 import { jobManager } from './process/jobs'
@@ -90,8 +92,33 @@ function createWindow(): void {
     mainWindow.show()
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+  // 应用自己那一份文档的地址:开发时是 dev server,打包后是 renderer/index.html。
+  // will-navigate 只放它过去(刷新与 HMR 的整页重载都落在同一个地址上)。
+  const appDocument =
+    is.dev && process.env['ELECTRON_RENDERER_URL']
+      ? process.env['ELECTRON_RENDERER_URL']
+      : pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
+
+  /** 交给系统默认浏览器;打不开只留一行日志,不让它变成主进程的未处理异常 */
+  const openExternal = (url: string): void => {
+    void shell.openExternal(url).catch((err: unknown) => {
+      console.warn('[links] 无法交给系统浏览器打开', url, err)
+    })
+  }
+
+  // Markdown 里的普通 `<a href>` 是同窗口导航:不拦的话整个应用会被目标站点替换,
+  // 路由状态与返回入口一起丢掉(表现为白屏)。外链交给系统浏览器,窗口留在原处。
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isAppDocument(url, appDocument)) return
+    event.preventDefault()
+    const external = externalLinkFor(url)
+    if (external) openExternal(external)
+  })
+
+  // `target="_blank"` / window.open 走另一条路:不新建 Electron 窗口,同样交给系统浏览器。
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    const external = externalLinkFor(url)
+    if (external) openExternal(external)
     return { action: 'deny' }
   })
 

@@ -71,6 +71,19 @@ interface UseAgentStreamResult {
   detachedQuestion: PendingQuestion | null
   /** 启动 Agent run,返回 IPC 结果;成功后开始接收流式事件 */
   start: (conversationId: string, ref: ModelRef) => Promise<IpcResult<{ runId: string }>>
+  /** 启动一次计划 run(需求已是最后一条 user 行);过程同样经 chat:stream 推送 */
+  startPlan: (conversationId: string, ref: ModelRef) => Promise<IpcResult<{ runId: string }>>
+  /** 按修改意见重出一版计划;feedback 必须已经先落成一条 user 行 */
+  startRevision: (
+    conversationId: string,
+    ref: ModelRef,
+    feedback: string
+  ) => Promise<IpcResult<{ runId: string }>>
+  /**
+   * 接管一个已经由主进程启动的 run(批准计划后的执行 run)。
+   * 与 `start` 的区别只是不发起调用 —— runId 是 `chat:approvePlan` 的返回值。
+   */
+  track: (conversationId: string, runId: string) => void
   /** 中止当前 run */
   abort: () => Promise<void>
   /**
@@ -94,16 +107,54 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
   const [detachedQuestion, setDetachedQuestion] = useState<PendingQuestion | null>(null)
   // 事件监听器里读取最新值,避免闭包拿到过期 state
   const streamingRef = useRef<StreamingRun | null>(null)
+  // 本帧待提交的那一份(rAF 合并用,见 update)
+  const pendingRef = useRef<StreamingRun | null>(null)
+  const frameRef = useRef<number | null>(null)
   const optionsRef = useRef(options)
 
   useEffect(() => {
     optionsRef.current = options
   })
 
+  /**
+   * 把一次流式状态变化交给 React。
+   *
+   * 模型每个 token 一条 delta 事件,逐条 setState 等于每秒提交几十次整棵消息树 ——
+   * 提交越密,任何一处布局期 / 引用回调里的同步写就越容易叠成 React 的嵌套更新上限
+   * (报错「Maximum update depth exceeded」)。合并到下一帧只提交最新的一份:
+   * 观感不变(人眼也只看得见每一帧),提交次数降到每秒最多一帧一次。
+   *
+   * `null` 不合并:run 结束必须立刻落地,否则停止按钮会一直转,
+   * 而排队中的旧快照还可能把已清空的状态又写回去。
+   */
   const update = useCallback((next: StreamingRun | null): void => {
     streamingRef.current = next
-    setStreaming(next)
+    pendingRef.current = next
+    if (next === null) {
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current)
+        frameRef.current = null
+      }
+      setStreaming(null)
+      return
+    }
+    if (frameRef.current !== null) return
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = null
+      setStreaming(pendingRef.current)
+    })
   }, [])
+
+  // 重载渲染层 / 热更新会让这个 hook 卸载,待定帧不能留到那时再对旧实例 setState
+  useEffect(
+    () => (): void => {
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current)
+        frameRef.current = null
+      }
+    },
+    []
+  )
 
   useEffect(() => {
     const unsubscribe = window.api.chat.onStream(async (event) => {
@@ -226,6 +277,66 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
     [update]
   )
 
+  const startPlan = useCallback(
+    async (conversationId: string, ref: ModelRef): Promise<IpcResult<{ runId: string }>> => {
+      const res = await window.api.chat.generatePlan({
+        conversationId,
+        providerId: ref.providerId,
+        model: ref.model
+      })
+      if (res.success) {
+        update({
+          conversationId,
+          runId: res.data.runId,
+          steps: [],
+          pendingQuestion: null,
+          pendingApproval: null
+        })
+      }
+      return res
+    },
+    [update]
+  )
+
+  const startRevision = useCallback(
+    async (
+      conversationId: string,
+      ref: ModelRef,
+      feedback: string
+    ): Promise<IpcResult<{ runId: string }>> => {
+      const res = await window.api.chat.revisePlan({
+        conversationId,
+        feedback,
+        providerId: ref.providerId,
+        model: ref.model
+      })
+      if (res.success) {
+        update({
+          conversationId,
+          runId: res.data.runId,
+          steps: [],
+          pendingQuestion: null,
+          pendingApproval: null
+        })
+      }
+      return res
+    },
+    [update]
+  )
+
+  const track = useCallback(
+    (conversationId: string, runId: string): void => {
+      update({
+        conversationId,
+        runId,
+        steps: [],
+        pendingQuestion: null,
+        pendingApproval: null
+      })
+    },
+    [update]
+  )
+
   const abort = useCallback(async (): Promise<void> => {
     const current = streamingRef.current
     if (!current) return
@@ -274,6 +385,9 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
     detachedApproval,
     detachedQuestion,
     start,
+    startPlan,
+    startRevision,
+    track,
     abort,
     refreshApprovals,
     refreshQuestions

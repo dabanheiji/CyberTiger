@@ -27,7 +27,13 @@ import type {
   CompactReport,
   RunScope,
   SummaryMetrics,
-  ToolCallRecord
+  ToolCallRecord,
+  generatePlanDto,
+  revisePlanDto,
+  approvePlanDto,
+  discardPlanDto,
+  PendingPlanDto,
+  ApprovePlanResult
 } from './dto'
 import {
   runAgent,
@@ -67,8 +73,21 @@ import {
   type SubAgentSpawner
 } from '../agent/task'
 import { agentRegistry } from '../agents/registry'
-import { GENERIC_AGENT } from '../agents/builtin'
-import { loadSkillTool } from '../skills/tools'
+import { GENERIC_AGENT, PLAN_AGENT_NAME, PLAN_AGENT_MAX_STEPS } from '../agents/builtin'
+import { loadSkillTool, readSkillFileTool } from '../skills/tools'
+import { readFileTool } from '../tools/files'
+import { getCurrentTimeTool } from '../tools/time'
+import { createReadOnlyRunCommandTool } from '../tools/plan'
+import { createPlanTasksTool } from '../tools/planTasks'
+import { derivePendingPlan, isPlanDraft } from '../plan/pending'
+import {
+  planExecutionMessage,
+  planRequestMessage,
+  planSystemMessage,
+  recentContextDigest,
+  revisionRequestMessage
+} from '../plan/prompt'
+import { allocatePlanPaths, writeFileAtomic } from '../plan/paths'
 import { estimateRequestTokens, estimateTextTokens } from '../tokens/estimate'
 import {
   createToolRunner,
@@ -361,6 +380,11 @@ export function setConversationWorkspace(
 /**
  * 水位之后的顶层行:压缩后发给模型的那段历史(不含子 agent 的嵌套行)。
  * 没有水位时这条 SQL 退化成全量顶层行,所以调用方不需要分支。
+ *
+ * 计划草稿（agent = plan-agent）在这里一并排除:它属于规划那一轮,不是主 Agent 说过的话。
+ * 同一次 plan run 的 assistant / tool 行带同一个 agent,所以整组一起被排除,
+ * 结构上不会留下孤儿 tool_calls;批准时计划全文会写进那条 `[计划执行]` user 消息,
+ * 主 Agent 不依赖草稿行也能拿到计划。
  */
 export function listMessagesAfterWatermark(conversationId: string): Message[] {
   const { summaryUntil } = getSummaryState(conversationId)
@@ -368,6 +392,7 @@ export function listMessagesAfterWatermark(conversationId: string): Message[] {
     .prepare<[string, string], MessageRow>(chatSql.messages.listTopLevelAfter)
     .all(conversationId, summaryUntil)
     .map(rowToMessage)
+    .filter((m) => m.agent !== PLAN_AGENT_NAME)
 }
 
 /**
@@ -922,23 +947,290 @@ function createAsker(
 }
 
 /**
- * 启动一次 Agent run:基于会话历史让模型推理、调用工具、生成最终回复。
- * 同步返回 runId,过程在后台进行,各步事件通过 emit 推送。
+ * 解析本次调用使用的模型引用。
+ * 单次 run 以调用方显式传入的选择为准;没传就退回设置里上次选中的那个。
+ */
+function resolveModelRef(providerId: string | undefined, model: string): ModelRef {
+  if (!model) throw new Error('请先选择模型')
+  const ref: ModelRef | undefined = providerId
+    ? { providerId, model }
+    : normalizeRef(store.get('currentModel'), listProviders())
+  if (!ref) throw new Error('请先在设置中配置模型服务商')
+  return ref
+}
+
+interface PlanRunInput {
+  conversationId: string
+  scope: RunScope
+  ref: ModelRef
+  connection: ResolvedConnection
+  signal: AbortSignal
+  emit: (event: ChatStreamEvent) => void
+  request: ChatCompletionMessage
+}
+
+/**
+ * 跑一次 plan-agent。
  *
- * `notify` 只在有审批在等时用:审批会让整轮停在用户身上,而用户可能根本没在看这个窗口。
- * 它由 controller 传入(那里才握着 WebContents),service 不认识 electron 窗口。
+ * 它是一条独立的 root run（depth 0），不是 `task` 子 run：子 run 的结论会被 8 KB 截断，
+ * 也拿不到 `ask_user`（那要闭包握住这次的 emit / scope / signal），而「信息不足先问用户」
+ * 正是计划模式最要紧的一条。因此这里自己组工具池、自己调 `runAgent`。
+ *
+ * 工具池只读：`write_file` / `background_job` / `task` / MCP 一概没有，`run_command` 换成
+ * 只读包装。审批与钩子也不装 —— 规划阶段只读，审批卡片只会是噪音；代价是用户装的钩子
+ * 看不到规划过程。
+ */
+async function startPlanRun(input: PlanRunInput): Promise<void> {
+  const { conversationId, scope, ref, connection, signal, emit } = input
+  const workspace = getWorkspace(conversationId)
+  // 边界仍照常算一次:只读命令也要关进受限执行环境(凭据目录读不到),
+  // 而且 system 里那句边界说明必须与 run_command 实际拿到的启动器是同一份设置
+  let jail: ToolContext['jail']
+  const sandboxSettings = store.get('sandbox')
+  try {
+    const root = jailFor(sandboxSettings, workspace)
+    jail = root ? { ...root, exec: execFor(sandboxSettings, root, await engineProbe()) } : undefined
+  } catch (error) {
+    emit({ type: 'error', scope, msg: error instanceof Error ? error.message : String(error) })
+    return
+  }
+
+  const tools: ToolDefinition[] = [
+    getCurrentTimeTool,
+    loadSkillTool,
+    readSkillFileTool,
+    readFileTool,
+    createReadOnlyRunCommandTool(),
+    createAskUserTool(createAsker(scope, signal, emit))
+  ]
+
+  await runAgent({
+    scope,
+    baseUrl: connection.baseUrl,
+    apiKey: connection.apiKey,
+    model: connection.model,
+    providerId: ref.providerId,
+    signal,
+    history: [
+      planSystemMessage(
+        workspace,
+        jail !== undefined,
+        jail?.exec?.state === 'confined',
+        connection
+      ),
+      input.request
+    ],
+    // 相对路径与只读命令的 cwd 仍锚在会话工作空间上
+    workspace,
+    jail,
+    // 不套 withGate / withHooks:计划阶段不产生审批卡片与钩子副作用
+    runner: createToolRunner(tools),
+    maxSteps: PLAN_AGENT_MAX_STEPS,
+    budget: budgetFor(connection.contextWindow),
+    store: agentStore,
+    emit
+  })
+}
+
+/** 取最后一条 user 行与它之前的消息:计划 run 只要「这次需求」加一段最近上下文 */
+function latestRequirement(messages: readonly Message[]): {
+  requirement: string
+  before: Message[]
+} | null {
+  const filtered = messages.filter((m) => m.agent !== PLAN_AGENT_NAME)
+  for (let index = filtered.length - 1; index >= 0; index -= 1) {
+    if (filtered[index].role === 'user') {
+      return { requirement: filtered[index].content, before: filtered.slice(0, index) }
+    }
+  }
+  return null
+}
+
+/** 登记一次 run 并把它交给 start（同步返回 runId,过程在后台） */
+function launchRun(conversationId: string): { runId: string; controller: AbortController } {
+  const runId = uuidv4()
+  const controller = new AbortController()
+  activeRuns.set(runId, { conversationId, controller })
+  return { runId, controller }
+}
+
+/**
+ * 让 plan-agent 生成一份计划。
+ *
+ * 需求本身已经由界面落成 user 行（`sendMessage`），这里只读它并回放一段最近上下文 ——
+ * 规划不需要整段历史，工具结果与旧草稿反而会把目标冲淡。
+ */
+export function generatePlan(dto: generatePlanDto, emit: (event: ChatStreamEvent) => void): string {
+  if (hasActiveWork(dto.conversationId)) {
+    throw new Error('这一轮还在进行中,请等它结束或先点击停止')
+  }
+  const ref = resolveModelRef(dto.providerId, dto.model)
+  const connection = resolveConnection(ref)
+  const messages = listTopLevelMessages(dto.conversationId)
+  const found = latestRequirement(messages)
+  if (!found) throw new Error('会话不存在或没有可发送的消息')
+
+  const { runId, controller } = launchRun(dto.conversationId)
+  const scope: RunScope = {
+    conversationId: dto.conversationId,
+    runId,
+    agent: PLAN_AGENT_NAME,
+    parentCallId: '',
+    depth: 0
+  }
+  void startPlanRun({
+    conversationId: dto.conversationId,
+    scope,
+    ref,
+    connection,
+    signal: controller.signal,
+    emit,
+    request: planRequestMessage(recentContextDigest(found.before), found.requirement)
+  }).finally(() => {
+    activeRuns.delete(runId)
+  })
+  return runId
+}
+
+/**
+ * 按用户的修改意见重出一版计划。
+ *
+ * 修改意见已经作为 user 行落库（界面上要有这条痕迹），所以这里不能再用「最后一条 user 行」
+ * 找需求 —— 那是意见本身。需求取最后一版草稿之前的那条 user 行，上一版计划取最后一版草稿。
+ */
+export function revisePlan(dto: revisePlanDto, emit: (event: ChatStreamEvent) => void): string {
+  if (hasActiveWork(dto.conversationId)) {
+    throw new Error('这一轮还在进行中,请等它结束或先点击停止')
+  }
+  const feedback = dto.feedback.trim()
+  if (!feedback) throw new Error('请先写下要修改的地方')
+  const ref = resolveModelRef(dto.providerId, dto.model)
+  const connection = resolveConnection(ref)
+
+  const messages = listTopLevelMessages(dto.conversationId)
+  const draftIndexes = messages
+    .map((message, index) => (isPlanDraft(message) ? index : -1))
+    .filter((index) => index >= 0)
+  const lastDraftIndex = draftIndexes[draftIndexes.length - 1]
+  if (lastDraftIndex === undefined) throw new Error('没有可修订的计划')
+  const previousPlan = messages[lastDraftIndex].content
+  const found = latestRequirement(messages.slice(0, lastDraftIndex))
+  if (!found) throw new Error('找不到这次计划对应的需求')
+
+  const { runId, controller } = launchRun(dto.conversationId)
+  const scope: RunScope = {
+    conversationId: dto.conversationId,
+    runId,
+    agent: PLAN_AGENT_NAME,
+    parentCallId: '',
+    depth: 0
+  }
+  void startPlanRun({
+    conversationId: dto.conversationId,
+    scope,
+    ref,
+    connection,
+    signal: controller.signal,
+    emit,
+    request: revisionRequestMessage(
+      recentContextDigest(found.before),
+      found.requirement,
+      previousPlan,
+      feedback
+    )
+  }).finally(() => {
+    activeRuns.delete(runId)
+  })
+  return runId
+}
+
+/** 当前待审批的计划;没有就是 null（用户还没生成、已批准、或已发了下一句） */
+export function pendingPlan(conversationId: string): PendingPlanDto | null {
+  const draft = derivePendingPlan(listMessages(conversationId))
+  if (!draft) return null
+  return {
+    conversationId,
+    workspace: getWorkspace(conversationId),
+    plan: draft.plan,
+    revision: draft.revision,
+    createdAt: draft.createdAt
+  }
+}
+
+/**
+ * 批准待审批的计划:落盘 → 写一条 `[计划执行]` user 行 → 启动主 run。
+ *
+ * 计划文件在**批准之后**才写（这是「先给用户看,通过了才保存」那条要求）。
+ * 执行 run 就是普通主 run,额外挂一个 `plan_tasks` 工具维护任务文件 —— 它与
+ * `extraTools` 一起只在这一次 run 的工具池里,子 Agent 结构上拿不到。
+ */
+export function approvePlan(
+  dto: approvePlanDto,
+  emit: (event: ChatStreamEvent) => void
+): ApprovePlanResult {
+  if (hasActiveWork(dto.conversationId)) {
+    throw new Error('这一轮还在进行中,请等它结束或先点击停止')
+  }
+  const ref = resolveModelRef(dto.providerId, dto.model)
+  const connection = resolveConnection(ref)
+
+  const draft = derivePendingPlan(listMessages(dto.conversationId))
+  if (!draft) throw new Error('没有待审批的计划')
+
+  const workspace = getWorkspace(dto.conversationId)
+  const { planPath, taskPath } = allocatePlanPaths(workspace, draft.plan)
+  writeFileAtomic(planPath, `${draft.plan.trim()}\n`)
+
+  sendMessage({
+    conversationId: dto.conversationId,
+    content: planExecutionMessage({ planPath, taskPath, plan: draft.plan })
+  })
+
+  const { runId, controller } = launchRun(dto.conversationId)
+  void startRun({
+    conversationId: dto.conversationId,
+    scope: {
+      conversationId: dto.conversationId,
+      runId,
+      agent: '',
+      parentCallId: '',
+      depth: 0
+    },
+    ref,
+    connection,
+    signal: controller.signal,
+    emit,
+    extraTools: [createPlanTasksTool(taskPath)]
+  }).finally(() => {
+    activeRuns.delete(runId)
+  })
+
+  return { runId, planPath, taskPath }
+}
+
+/**
+ * 放弃待审批的计划:只删最后一条 user 行之后的 plan-agent 行。
+ * 更早的历史不动,计划 mode 本身也不退出（用户可能想重来一次）。
+ */
+export function discardPlan(dto: discardPlanDto): void {
+  if (hasActiveWork(dto.conversationId)) {
+    throw new Error('规划还在进行中,请等它结束或先点击停止')
+  }
+  getDb().prepare(chatSql.messages.removePlanDrafts).run(dto.conversationId, dto.conversationId)
+}
+
+/**
+ * 普通回复:同步返回 runId,压缩与模型调用在后台跑。
+ *
+ * `emit` 由 controller 给(它握着 webContents),`notify` 只在审批等待时用 ——
+ * 那一层要 `BrowserWindow`,所以 service 不碰窗口。
  */
 export function generateReply(
   dto: generateReplyDto,
   emit: (event: ChatStreamEvent) => void,
   notify?: (request: ApprovalRequest) => void
 ): string {
-  if (!dto.model) throw new Error('请先选择模型')
-  // 单次 run 以调用方显式传入的选择为准;没传就退回设置里上次选中的那个
-  const ref: ModelRef | undefined = dto.providerId
-    ? { providerId: dto.providerId, model: dto.model }
-    : normalizeRef(store.get('currentModel'), listProviders())
-  if (!ref) throw new Error('请先在设置中配置模型服务商')
+  const ref = resolveModelRef(dto.providerId, dto.model)
   // 连接在 run 开始前解析一次并随参数带走:过程中改设置不影响这一轮
   const connection = resolveConnection(ref)
 
@@ -979,6 +1271,12 @@ interface StartRunInput {
   emit: (event: ChatStreamEvent) => void
   /** 审批等待时的系统通知,原样转交给审批上下文 */
   notify?: (request: ApprovalRequest) => void
+  /**
+   * 只在这一轮挂上的工具（目前是计划执行时的 `plan_tasks`）。
+   * 加在 `task` 之后,所以子 Agent 的 `parentTools` 快照里没有它 ——
+   * 子 run 不该去改父级那份任务清单。
+   */
+  extraTools?: ToolDefinition[]
 }
 
 /**
@@ -1068,6 +1366,10 @@ async function startRun(input: StartRunInput): Promise<void> {
       )
     )
   }
+
+  // 只属于这一轮的工具(计划执行时的 `plan_tasks`)。放在 `task` 之后:子 Agent 的
+  // `parentTools` 就是上面那份 `definitions` 快照,它结构上拿不到这里追加的东西。
+  if (input.extraTools) tools.push(...input.extraTools)
 
   // 请求前自动压缩:没过触发线什么也不做;摘要调用失败也不阻断本轮 ——
   // 带着全部历史继续跑,由 planContext 的硬上限兜底,总比直接拒绝对话好。
