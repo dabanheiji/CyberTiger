@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Bubble, Sender, Suggestion, Welcome } from '@ant-design/x'
 import type { BubbleListProps } from '@ant-design/x'
-import XMarkdown from '@ant-design/x-markdown'
 import { Avatar, Button, Dropdown, Flex, Popover, Progress, Select, Space, Tag, theme } from 'antd'
 import type { GlobalToken, MenuProps } from 'antd'
 import {
@@ -43,6 +42,7 @@ import AgentSteps from '../../components/AgentSteps'
 import AskUserCard from '../../components/AskUserCard'
 import ApprovalCard from '../../components/ApprovalCard'
 import ErrorBoundary from '../../components/ErrorBoundary'
+import Markdown from '../../components/Markdown'
 import PlanApprovalCard from '../../components/PlanApprovalCard'
 import PermissionPicker from './PermissionPicker'
 
@@ -159,7 +159,7 @@ function makeRoles(token: GlobalToken): BubbleListProps['role'] {
               {msg.skill}
             </Tag>
           )}
-          <XMarkdown content={msg.content} />
+          <Markdown content={msg.content} />
         </>
       )
     },

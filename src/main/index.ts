@@ -10,6 +10,7 @@ import { mcpManager } from './mcp/manager'
 import { initSkills } from './skills/controller'
 import { initAgents } from './agents/controller'
 import { initHooks } from './hooks/controller'
+import { disposeTerminals, initTerminal } from './terminal/controller'
 import { migrateSettings } from './store/migrate'
 import { store } from './store'
 import { externalLinkFor, isAppDocument } from './links'
@@ -71,6 +72,8 @@ function createWindow(): void {
   })
 
   trackWindowState(mainWindow)
+  // 终端事件只发给这一个窗口;窗口关闭时退订并收掉全部 shell
+  initTerminal(mainWindow)
 
   // 运行中切系统主题:底色与 win/linux 的按钮叠层都得跟着换,否则顶栏留一条旧色的带
   nativeTheme.on('updated', () => {
@@ -179,7 +182,8 @@ app.whenReady().then(() => {
 
 /**
  * 退出前中止所有进行中的模型请求,避免数据库关闭后仍在写入;关闭 MCP 子进程;
- * 并把名下的后台作业一起收掉(有 3 秒总预算,杀不掉的进程不会拖住退出)。
+ * 把名下的后台作业一起收掉(有 3 秒总预算,杀不掉的进程不会拖住退出);
+ * 终端 shell 同步收掉(`disposeAll` 幂等,窗口关闭时已经收过一次)。
  *
  * 这几件事都是异步的,而 `before-quit` 默认不会等 Promise —— 所以先 `preventDefault`,
  * 做完再 `quit()` 一次。`quitting` 那个守卫让第二次进来时不再拦。
@@ -191,6 +195,7 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   void (async () => {
     abortAll()
+    disposeTerminals()
     await Promise.all([jobManager.stopAll(), mcpManager.closeAll()])
     app.quit()
   })()

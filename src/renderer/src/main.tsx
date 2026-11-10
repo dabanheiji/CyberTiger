@@ -4,6 +4,12 @@
 import '@fontsource/inter/latin-400.css'
 import '@fontsource/inter/latin-500.css'
 import '@fontsource/inter/latin-600.css'
+// Markdown 官方主题:两套都引入,由 Markdown 组件按明暗挂 x-markdown-light / dark。
+// 放在应用样式之前 —— 第三方样式先、应用样式后,需要覆盖时顺序天然站在我们这边。
+import '@ant-design/x-markdown/themes/light.css'
+import '@ant-design/x-markdown/themes/dark.css'
+// xterm 的结构样式(逐行定位、选区层、滚动区)。放在应用样式之前,覆盖时顺序站我们这边。
+import '@xterm/xterm/css/xterm.css'
 import './assets/main.css'
 
 // import { StrictMode } from 'react'

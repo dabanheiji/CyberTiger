@@ -1,4 +1,3 @@
-import XMarkdown from '@ant-design/x-markdown'
 import { Typography, theme } from 'antd'
 import { formatTokens } from '../../../main/tokens/estimate'
 import {
@@ -8,8 +7,10 @@ import {
   type StreamingToolCall
 } from '../lib/agentSteps'
 import { contextShare } from '../lib/contextUsage'
+import Markdown from './Markdown'
 import ReasoningBox from './ReasoningBox'
 import ToolCallChain from './ToolCallChain'
+import TypingDots from './TypingDots'
 
 interface AgentStepsProps {
   steps: AgentStep[]
@@ -58,6 +59,9 @@ function AgentSteps({
   const tooling = isTooling(steps, streaming)
   // 用量挂在每一步上,汇总成一行显示;子 Agent 的用量已经并进来
   const usage = summarizeUsage(steps)
+  // 正文尾部的生成指示:没有正文时由 Bubble 自己的加载点占位,这里只接它之后的空档。
+  // 等审批时这一轮停在用户身上,模型没有在生成,不摆一个「还在动」的指示。
+  const showTyping = streaming && contents.length > 0 && !awaitingApprovalCallId
 
   return (
     <>
@@ -75,8 +79,9 @@ function AgentSteps({
         />
       )}
       {contents.map((item) => (
-        <XMarkdown key={item.id} content={item.text} />
+        <Markdown key={item.id} content={item.text} />
       ))}
+      {showTyping && <TypingDots />}
       {usage && (
         <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
           {`上下文 ${formatTokens(usage.prompt)}${usage.estimated ? '(估算)' : ''}${contextShare(usage.prompt, contextWindow)} · 输出 ${formatTokens(usage.completion)}`}

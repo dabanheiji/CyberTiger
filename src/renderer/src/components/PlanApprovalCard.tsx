@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Button, Flex, Input, Tag, Typography, theme } from 'antd'
 import { FileTextOutlined } from '@ant-design/icons'
 import type { GlobalToken } from 'antd'
-import XMarkdown from '@ant-design/x-markdown'
+import Markdown from './Markdown'
 
 interface PlanApprovalCardProps {
   /** 待审批的计划正文(markdown);批准后服务端原样落盘 */
@@ -74,7 +74,7 @@ function PlanApprovalCard({
         </Flex>
 
         <div style={previewStyle(token)}>
-          <XMarkdown content={plan} />
+          <Markdown content={plan} />
         </div>
 
         <Flex vertical gap={token.marginXXS}>

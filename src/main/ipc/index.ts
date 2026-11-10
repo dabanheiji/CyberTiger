@@ -30,6 +30,7 @@ import {
 import * as skills from '../skills/controller'
 import * as agents from '../agents/controller'
 import * as hooks from '../hooks/controller'
+import * as terminal from '../terminal/controller'
 import { report as statsReport } from '../stats/controller'
 
 export function registerIpc(): void {
@@ -97,4 +98,9 @@ export function registerIpc(): void {
 
   // 报表:一次区间的 token 用量统计,纯读
   ipcMain.handle('stats:report', statsReport)
+
+  // 终端:按会话的工作空间起 shell;输出经 terminal:event 单向推给窗口
+  ipcMain.handle('terminal:ensure', terminal.ensure)
+  ipcMain.handle('terminal:write', terminal.write)
+  ipcMain.handle('terminal:resize', terminal.resize)
 }

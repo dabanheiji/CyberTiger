@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
-import { App, theme } from 'antd'
+import { App, Button, Tooltip, theme } from 'antd'
+import { BorderRightOutlined } from '@ant-design/icons'
 import type { Conversation, Message } from '../../../../main/chat/sql'
 import type { ApprovalOutcome, PendingPlanDto } from '../../../../main/chat/dto'
 import type {
@@ -15,6 +16,7 @@ import { commandBlockedReason } from '../../lib/chatCommands'
 import { pushRecent } from '../../lib/workspace'
 import Sidebar from './Sidebar'
 import ChatPanel from './ChatPanel'
+import SidePanel from './SidePanel'
 import ErrorBoundary from '../../components/ErrorBoundary'
 import { useAgentStream } from '../../hooks/useAgentStream'
 
@@ -59,6 +61,8 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
   const [defaultWorkspace, setDefaultWorkspace] = useState('')
   /** 最近用过的工作空间,最新在前;跨会话共享,所以放在设置里而不是会话行上 */
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([])
+  /** 右侧边栏(本期只有终端)是否展开 */
+  const [panelOpen, setPanelOpen] = useState(false)
   // 与 activeId 同步的 ref,供异步回调判断返回结果是否仍属于当前会话
   const activeIdRef = useRef<string | null>(null)
 
@@ -241,8 +245,10 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
   const applyWorkspace = async (dir: string): Promise<void> => {
     const conversationId = activeIdRef.current
     if (conversationId === null) {
-      setDefaultWorkspace(dir)
+      // 先落库再改界面状态:终端 ensure 读的是主进程里的 defaultWorkspace,
+      // 界面先跑一步会让面板开着换目录时终端仍落在旧目录
       await window.api.settings.set('defaultWorkspace', dir)
+      setDefaultWorkspace(dir)
     } else {
       const res = await window.api.chat.setWorkspace({ conversationId, dir })
       if (!res.success) {
@@ -644,6 +650,8 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
       style={{
         display: 'flex',
         height: '100%',
+        // 侧边栏是绝对定位浮层,根节点必须自己成为定位基准
+        position: 'relative',
         background: token.colorBgLayout
         // 顶栏预留不在这里:那样整条上沿都是侧栏底色,白画布上会多一条带。
         // 改由侧栏与画布各铺一条同底色的空白带,见 Sidebar / ChatPanel
@@ -703,6 +711,34 @@ function ChatPage({ permissions, onPermissionsChange }: ChatPageProps): React.JS
           onClearWorkspace={() => void handleClearWorkspace()}
         />
       </ErrorBoundary>
+      {panelOpen && (
+        <SidePanel
+          conversationId={activeId}
+          workspace={activeWorkspace}
+          onClose={() => setPanelOpen(false)}
+        />
+      )}
+      {/* 右上角那颗开关。win/linux 要给系统窗口按钮(约 138px)让位,
+          mac 的红绿灯在左上,不冲突。
+          必须排在本页所有拖拽带之后渲染:Chromium 按收集顺序合并拖拽区
+          (后面的 drag 会盖掉前面已扣掉的 no-drag),排到 ChatPanel / SidePanel
+          前面时它会落在画布那条 drag 带里,物理点击被当成拖窗口,按钮一声不响 */}
+      <Tooltip title={panelOpen ? '收起侧边栏' : '打开侧边栏'}>
+        <Button
+          className="cybertiger-no-drag"
+          type="text"
+          size="small"
+          aria-label={panelOpen ? '收起侧边栏' : '打开侧边栏'}
+          icon={<BorderRightOutlined />}
+          onClick={() => setPanelOpen((open) => !open)}
+          style={{
+            position: 'absolute',
+            top: 7,
+            right: window.electron.process.platform === 'darwin' ? 12 : 148,
+            zIndex: 20
+          }}
+        />
+      </Tooltip>
     </div>
   )
 }

@@ -60,6 +60,11 @@ pre {
   -webkit-app-region: drag;
 }
 
+/* 浮在拖拽带上的按钮(侧边栏开关等):不加这一条,整块拖拽区会把点击吞给窗口 */
+.cybertiger-no-drag {
+  -webkit-app-region: no-drag;
+}
+
 /*
  * 滚动条:antd token 管不到,只能在这里。滑块用中性灰而不是强调色 —— 它在深浅两套背景上
  * 都要看得见,又不该抢视线;透明 border + background-clip 是为了让滑块看起来比轨道窄。
@@ -143,6 +148,64 @@ a:focus-visible,
 }
 
 /*
+ * 正文尾部的生成指示(见 TypingDots):三颗 4px 圆点上下跳动,节奏照 @ant-design/x
+ * Bubble 那份 loading 抄(2s 线性、上下 4px、依次错开 0.2s),于是「第一个 token 之前的
+ * 官方加载点」与「之后的自绘指示」看起来是同一个东西在继续动。
+ * 颜色走 currentColor —— 组件按 colorPrimary 注入,强调色与明暗切换不必在这里再写一套。
+ * 高度收窄到 16px:它接在正文末尾,不该比一行正文还占地方。
+ */
+.cybertiger-typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  margin-top: 2px;
+  padding: 0 2px;
+}
+
+.cybertiger-typing-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: cybertiger-typing-move 2s linear infinite;
+}
+
+.cybertiger-typing-dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.cybertiger-typing-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes cybertiger-typing-move {
+  0% {
+    transform: translateY(0);
+  }
+  10% {
+    transform: translateY(4px);
+  }
+  20% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-4px);
+  }
+  40% {
+    transform: translateY(0);
+  }
+}
+
+/* 减少动态效果时不跳动,只保留一颗静态的点表示「还在生成」 */
+@media (prefers-reduced-motion: reduce) {
+  .cybertiger-typing-dots i {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/*
  * 侧栏会话列表的分组标题(见 Sidebar 的 Conversations classNames.group)。
  * .ant-conversations-group-title 是 flex 行,但标签本身没有 flex 尺寸,长目录名会
  * 把行撑宽、组内那颗「+」也就贴不到右端;让标签吃满剩余宽度,里面的
@@ -159,4 +222,33 @@ a:focus-visible,
  */
 .cybertiger-conversations-group .ant-conversations-group-collapse-trigger {
   display: none;
+}
+
+/*
+ * 块级代码被换成 CodeHighlighter 之后,解析器给的外层 <pre> 还在(它是块级容器)。
+ * 基础样式对 pre 的 margin 已按 disableDefaultStyles 关掉,这里补回段落间距并让
+ * 其中的正文正常排版 —— 否则语言标题会继承 pre 的 pre-wrap 与 UA 的等宽缩进。
+ */
+.x-markdown pre:has(> .ant-codeHighlighter) {
+  margin: 0 0 16px;
+  padding: 0;
+  border: 0;
+  background: none;
+  white-space: normal;
+}
+
+/*
+ * 官方主题对 pre code 的规则带 !important,而两套的排除选择器都挡不住现在的
+ * CodeHighlighter(浅色那份还写着旧类名 -highlightCode-code,深色那份要求容器
+ * 类名正好是属性结尾,后面还跟着 hash 类)。这里显式让位:代码块的底色、内边距与
+ * 字体由高亮器容器和 Prism 主题负责,主题只管行内代码。
+ */
+.x-markdown:is(.x-markdown-light, .x-markdown-dark) .ant-codeHighlighter pre code {
+  background: transparent !important;
+  color: inherit !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  font-size: inherit !important;
+  line-height: inherit !important;
 }

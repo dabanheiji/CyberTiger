@@ -15,6 +15,7 @@
     "src/main/agents/types.ts",
     "src/main/hooks/dto.ts",
     "src/main/hooks/types.ts",
+    "src/main/terminal/dto.ts",
     "src/main/store/types.ts",
     "src/main/store/modelRef.ts",
     "src/main/tokens/estimate.ts"

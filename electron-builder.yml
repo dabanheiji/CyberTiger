@@ -11,6 +11,9 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
+  # node-pty 的 spawn-helper 没有 .node 后缀,smartUnpack 不会自动解包;
+  # 整个包显式解出来,打包后终端才起得来。
+  - node_modules/node-pty/**
 win:
   executableName: cybertiger
 nsis:

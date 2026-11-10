@@ -4,6 +4,7 @@ import mcp from './mcp'
 import skills from './skills'
 import agents from './agents'
 import hooks from './hooks'
+import terminal from './terminal'
 import stats from './stats'
 
 export default {
@@ -13,5 +14,6 @@ export default {
   skills,
   agents,
   hooks,
+  terminal,
   stats
 }
