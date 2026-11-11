@@ -1,39 +1,41 @@
 export const initSql = `-- 会话表
+-- 短字段声明成 VARCHAR(n):SQLite 不检查长度(与 TEXT 同属 TEXT 亲和性),
+-- 这么写只是让建表语句能看出字段的意图;长文本与 JSON 仍用 TEXT。
 CREATE TABLE IF NOT EXISTS conversations (
-  id         TEXT PRIMARY KEY,
-  title      TEXT NOT NULL DEFAULT '新对话',
+  id            VARCHAR(36) PRIMARY KEY,
+  title         VARCHAR(255) NOT NULL DEFAULT '新对话',
   -- 上下文压缩后的摘要正文;空串表示这个会话还没压过
-  summary    TEXT NOT NULL DEFAULT '',
+  summary       TEXT NOT NULL DEFAULT '',
   -- 摘要已覆盖到最后一条消息的 id(水位);水位之前的行不再进请求
-  summary_until TEXT NOT NULL DEFAULT '',
+  summary_until VARCHAR(36) NOT NULL DEFAULT '',
   -- 上次压缩的账目 JSON(SummaryMetrics),空串表示没有
   summary_usage TEXT NOT NULL DEFAULT '',
   -- 会话级工作空间目录:文件与 shell 工具的相对路径按它解析;空串表示未选
-  workspace TEXT NOT NULL DEFAULT '',
+  workspace     TEXT NOT NULL DEFAULT '',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 消息表:按 OpenAI 协议逐条存放,一次提问(run)可能产生多条 assistant / tool 行
 CREATE TABLE IF NOT EXISTS messages (
-  id              TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  role            TEXT NOT NULL CHECK(role IN ('user','assistant','system','tool')),
+  id              VARCHAR(36) PRIMARY KEY,
+  conversation_id VARCHAR(36) NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role            VARCHAR(16) NOT NULL CHECK(role IN ('user','assistant','system','tool')),
   content         TEXT NOT NULL,
   -- 模型的思考过程(DeepSeek / Ollama 等返回的 reasoning),没有则为空串
   reasoning       TEXT NOT NULL DEFAULT '',
   -- assistant 行发起的工具调用,JSON 数组 ToolCallRecord[]
   tool_calls      TEXT NOT NULL DEFAULT '[]',
   -- tool 行对应的调用 id
-  tool_call_id    TEXT NOT NULL DEFAULT '',
+  tool_call_id    VARCHAR(36) NOT NULL DEFAULT '',
   -- 同一次提问产生的所有行共享,供 UI 合并成一个气泡;子 agent 沿用父级的 run_id
-  run_id          TEXT NOT NULL DEFAULT '',
+  run_id          VARCHAR(36) NOT NULL DEFAULT '',
   -- user 行:通过 / 触发的 skill 名,发送给模型时展开为完整指令
-  skill           TEXT NOT NULL DEFAULT '',
+  skill           VARCHAR(128) NOT NULL DEFAULT '',
   -- 产生该行的角色名;空串表示主 agent,仅用于展示与排障
-  agent           TEXT NOT NULL DEFAULT '',
+  agent           VARCHAR(64) NOT NULL DEFAULT '',
   -- 该行归属的父级工具调用 id;空串表示顶层。子 agent 的行靠它挂到那次 task 调用下
-  parent_call_id  TEXT NOT NULL DEFAULT '',
+  parent_call_id  VARCHAR(36) NOT NULL DEFAULT '',
   -- 嵌套深度:0 = 主 agent,1 = 子 agent
   depth           INTEGER NOT NULL DEFAULT 0,
   -- 本步的 token 用量;仅 assistant 行有意义,其余为 0
@@ -43,14 +45,15 @@ CREATE TABLE IF NOT EXISTS messages (
   tokens_estimated INTEGER NOT NULL DEFAULT 0,
   -- 产生该行的模型名与服务商 id:报表要按模型归集用量。空串表示这一行写下时还没记录模型归属
   -- (加这两列之前的历史数据),报表把它们归进「未记录模型」而不是假装它们是某个模型
-  model           TEXT NOT NULL DEFAULT '',
-  provider_id     TEXT NOT NULL DEFAULT '',
+  model           VARCHAR(128) NOT NULL DEFAULT '',
+  provider_id     VARCHAR(64) NOT NULL DEFAULT '',
   created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 核心索引
-CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
-  ON messages(conversation_id, created_at);`
+-- 旧库删掉这条索引:本地库的数据量下,一次会话的消息顺扫+排序的代价远小于
+-- 每次插入维护一棵 B 树。每次启动 DROP IF EXISTS 只是让旧库跟上新 schema;
+-- 新库本来就不建。
+DROP INDEX IF EXISTS idx_messages_conversation_created;`
 
 /**
  * 增量迁移:按列名判断,旧库缺哪列补哪列。
@@ -150,9 +153,12 @@ export const columnMigrations: { table: string; column: string; ddl: string }[] 
 ]
 
 /**
- * 表重建迁移:SQLite 无法修改 CHECK 约束,旧库的 role 不允许 'tool',
- * 需要按"建新表 → 拷数据 → 删旧表 → 改名"重建。
- * needRebuild 拿到 sqlite_master 里的建表 SQL 判断是否需要。
+ * 表重建迁移:SQLite 无法修改 CHECK 约束,也无法修改列声明类型,
+ * 旧库需要按"建新表 → 拷数据 → 删旧表 → 改名"重建。
+ * needRebuild 拿到 sqlite_master 里的建表 SQL 判断是否需要:
+ * - messages:CHECK 里可能还没有 'tool'(更早的版本),或列还是 TEXT(这一版改成 VARCHAR)
+ * - conversations:列还是 TEXT
+ * 两条判定都幂等:重建后的建表 SQL 一定含 'tool' 与 VARCHAR。
  */
 export const tableRebuilds: {
   table: string
@@ -160,35 +166,53 @@ export const tableRebuilds: {
   rebuildSql: string
 }[] = [
   {
+    table: 'conversations',
+    needRebuild: (createSql) => !/VARCHAR/.test(createSql),
+    rebuildSql: `
+      CREATE TABLE conversations_new (
+        id            VARCHAR(36) PRIMARY KEY,
+        title         VARCHAR(255) NOT NULL DEFAULT '新对话',
+        summary       TEXT NOT NULL DEFAULT '',
+        summary_until VARCHAR(36) NOT NULL DEFAULT '',
+        summary_usage TEXT NOT NULL DEFAULT '',
+        workspace     TEXT NOT NULL DEFAULT '',
+        created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      -- 列必须逐条写全:迁移是「先补列再重建」,这里少写一列就等于把刚补上的那列连同数据一起丢掉
+      INSERT INTO conversations_new (id, title, summary, summary_until, summary_usage, workspace, created_at, updated_at)
+        SELECT id, title, summary, summary_until, summary_usage, workspace, created_at, updated_at FROM conversations;
+      DROP TABLE conversations;
+      ALTER TABLE conversations_new RENAME TO conversations;`
+  },
+  {
     table: 'messages',
-    needRebuild: (createSql) => !/'tool'/.test(createSql),
+    needRebuild: (createSql) => !/'tool'/.test(createSql) || !/VARCHAR/.test(createSql),
     rebuildSql: `
       CREATE TABLE messages_new (
-        id              TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        role            TEXT NOT NULL CHECK(role IN ('user','assistant','system','tool')),
+        id              VARCHAR(36) PRIMARY KEY,
+        conversation_id VARCHAR(36) NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        role            VARCHAR(16) NOT NULL CHECK(role IN ('user','assistant','system','tool')),
         content         TEXT NOT NULL,
         reasoning       TEXT NOT NULL DEFAULT '',
         tool_calls      TEXT NOT NULL DEFAULT '[]',
-        tool_call_id    TEXT NOT NULL DEFAULT '',
-        run_id          TEXT NOT NULL DEFAULT '',
-        skill           TEXT NOT NULL DEFAULT '',
-        agent           TEXT NOT NULL DEFAULT '',
-        parent_call_id  TEXT NOT NULL DEFAULT '',
+        tool_call_id    VARCHAR(36) NOT NULL DEFAULT '',
+        run_id          VARCHAR(36) NOT NULL DEFAULT '',
+        skill           VARCHAR(128) NOT NULL DEFAULT '',
+        agent           VARCHAR(64) NOT NULL DEFAULT '',
+        parent_call_id  VARCHAR(36) NOT NULL DEFAULT '',
         depth           INTEGER NOT NULL DEFAULT 0,
         prompt_tokens   INTEGER NOT NULL DEFAULT 0,
         completion_tokens INTEGER NOT NULL DEFAULT 0,
         tokens_estimated INTEGER NOT NULL DEFAULT 0,
-        model           TEXT NOT NULL DEFAULT '',
-        provider_id     TEXT NOT NULL DEFAULT '',
+        model           VARCHAR(128) NOT NULL DEFAULT '',
+        provider_id     VARCHAR(64) NOT NULL DEFAULT '',
         created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
       );
       -- 列必须逐条写全:迁移是「先补列再重建」,这里少写一列就等于把刚补上的那列连同数据一起丢掉
       INSERT INTO messages_new (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, prompt_tokens, completion_tokens, tokens_estimated, model, provider_id, created_at)
         SELECT id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, prompt_tokens, completion_tokens, tokens_estimated, model, provider_id, created_at FROM messages;
       DROP TABLE messages;
-      ALTER TABLE messages_new RENAME TO messages;
-      CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
-        ON messages(conversation_id, created_at);`
+      ALTER TABLE messages_new RENAME TO messages;`
   }
 ]

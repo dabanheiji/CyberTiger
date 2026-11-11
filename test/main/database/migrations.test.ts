@@ -26,6 +26,41 @@ CREATE TABLE messages (
   created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 );`
 
+/** 上一版的库:列全是 TEXT,messages 上还建着会话+时间那条索引 */
+const PRE_VARCHAR_SCHEMA = `
+CREATE TABLE conversations (
+  id         TEXT PRIMARY KEY,
+  title      TEXT NOT NULL DEFAULT '新对话',
+  summary    TEXT NOT NULL DEFAULT '',
+  summary_until TEXT NOT NULL DEFAULT '',
+  summary_usage TEXT NOT NULL DEFAULT '',
+  workspace TEXT NOT NULL DEFAULT '',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE messages (
+  id              TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role            TEXT NOT NULL CHECK(role IN ('user','assistant','system','tool')),
+  content         TEXT NOT NULL,
+  reasoning       TEXT NOT NULL DEFAULT '',
+  tool_calls      TEXT NOT NULL DEFAULT '[]',
+  tool_call_id    TEXT NOT NULL DEFAULT '',
+  run_id          TEXT NOT NULL DEFAULT '',
+  skill           TEXT NOT NULL DEFAULT '',
+  agent           TEXT NOT NULL DEFAULT '',
+  parent_call_id  TEXT NOT NULL DEFAULT '',
+  depth           INTEGER NOT NULL DEFAULT 0,
+  prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  tokens_estimated INTEGER NOT NULL DEFAULT 0,
+  model           TEXT NOT NULL DEFAULT '',
+  provider_id     TEXT NOT NULL DEFAULT '',
+  created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_messages_conversation_created
+  ON messages(conversation_id, created_at);`
+
 let db: DatabaseSync
 
 beforeEach(() => {
@@ -151,7 +186,7 @@ describe('补列迁移', () => {
 })
 
 describe('整表重建迁移', () => {
-  it('CHECK 里没有 tool 时重建,数据与索引都保住', () => {
+  it('CHECK 里没有 tool 时重建,数据保住,旧索引不再重建', () => {
     legacyDb()
     db.prepare("INSERT INTO conversations (id, title) VALUES ('c1', '会话')").run()
     db.prepare(
@@ -164,7 +199,7 @@ describe('整表重建迁移', () => {
     expect(
       db.prepare("SELECT content FROM messages WHERE id = 'm1'").get() as { content: string }
     ).toEqual({ content: '你好' })
-    expect(indexNames(db)).toContain('idx_messages_conversation_created')
+    expect(indexNames(db)).not.toContain('idx_messages_conversation_created')
     // 重建期间关掉的 foreign_keys 必须恢复,否则 CASCADE 就失效了
     expect(foreignKeysOn(db)).toBe(true)
 
@@ -200,21 +235,107 @@ describe('整表重建迁移', () => {
     })
   })
 
-  it('重建跑第二遍时判定为不需要,建表 SQL 不变', () => {
+  it('重建跑第二遍时判定为不需要,两张表的建表 SQL 都不变', () => {
     legacyDb()
     const driver = asMigrationDb(db)
     runColumnMigrations(driver)
     runTableRebuilds(driver)
-    const sqlAfter = createSqlOf(db, 'messages')
+    const after = {
+      conversations: createSqlOf(db, 'conversations'),
+      messages: createSqlOf(db, 'messages')
+    }
     runTableRebuilds(driver)
-    expect(createSqlOf(db, 'messages')).toBe(sqlAfter)
+    expect(createSqlOf(db, 'conversations')).toBe(after.conversations)
+    expect(createSqlOf(db, 'messages')).toBe(after.messages)
   })
 
   it('新库不需要重建', () => {
     db.exec(initSql)
-    const before = createSqlOf(db, 'messages')
+    const before = {
+      conversations: createSqlOf(db, 'conversations'),
+      messages: createSqlOf(db, 'messages')
+    }
     runTableRebuilds(asMigrationDb(db))
-    expect(createSqlOf(db, 'messages')).toBe(before)
+    expect(createSqlOf(db, 'conversations')).toBe(before.conversations)
+    expect(createSqlOf(db, 'messages')).toBe(before.messages)
+  })
+
+  it('会话表重建后声明类型变成 VARCHAR,摘要与工作空间原样保留', () => {
+    legacyDb()
+    const driver = asMigrationDb(db)
+    runColumnMigrations(driver)
+    db.prepare(
+      "INSERT INTO conversations (id, title, summary, summary_until, summary_usage, workspace) VALUES ('c1','旧会话','摘要正文','m9','{\"calls\":1}','/tmp/ws')"
+    ).run()
+
+    runTableRebuilds(driver)
+
+    const sql = createSqlOf(db, 'conversations') ?? ''
+    expect(sql).toMatch(/id\s+VARCHAR\(36\) PRIMARY KEY/)
+    expect(sql).toMatch(/title\s+VARCHAR\(255\)/)
+    expect(db.prepare("SELECT * FROM conversations WHERE id = 'c1'").get()).toMatchObject({
+      title: '旧会话',
+      summary: '摘要正文',
+      summary_until: 'm9',
+      summary_usage: '{"calls":1}',
+      workspace: '/tmp/ws'
+    })
+  })
+
+  it('从上一版 TEXT 库升级:两张表逐列数据不变,旧索引被删除,外键级联仍有效', () => {
+    db.exec(PRE_VARCHAR_SCHEMA)
+    db.prepare(
+      'INSERT INTO conversations (id, title, summary, summary_until, summary_usage, workspace, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)'
+    ).run(
+      'c1',
+      '会话一',
+      '早先的摘要',
+      'm1',
+      '{"calls":2}',
+      '/tmp/ws',
+      '2026-11-01 10:00:00',
+      '2026-11-02 11:00:00'
+    )
+    db.prepare(
+      `INSERT INTO messages (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, run_id, skill, agent, parent_call_id, depth, prompt_tokens, completion_tokens, tokens_estimated, model, provider_id, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).run(
+      'm1',
+      'c1',
+      'assistant',
+      '正文',
+      '思考',
+      '[{"id":"t1"}]',
+      't1',
+      'r1',
+      'my-skill',
+      'code-reviewer',
+      '',
+      0,
+      100,
+      20,
+      1,
+      'qwen3.5:4b',
+      'p1',
+      '2026-11-02 11:00:01'
+    )
+    const conversationsBefore = db.prepare('SELECT * FROM conversations').all()
+    const messagesBefore = db.prepare('SELECT * FROM messages').all()
+
+    const driver = asMigrationDb(db)
+    runColumnMigrations(driver)
+    runTableRebuilds(driver)
+
+    // 逐列相同:重建只改声明类型,不动任何一个值(含 created_at 文本与时序)
+    expect(db.prepare('SELECT * FROM conversations').all()).toEqual(conversationsBefore)
+    expect(db.prepare('SELECT * FROM messages').all()).toEqual(messagesBefore)
+    expect(createSqlOf(db, 'conversations')).toMatch(/VARCHAR/)
+    expect(createSqlOf(db, 'messages')).toMatch(/VARCHAR/)
+    expect(indexNames(db)).not.toContain('idx_messages_conversation_created')
+    expect(foreignKeysOn(db)).toBe(true)
+
+    db.prepare("DELETE FROM conversations WHERE id = 'c1'").run()
+    expect(db.prepare('SELECT COUNT(*) AS n FROM messages').get()).toEqual({ n: 0 })
   })
 
   it('表不存在时静默跳过', () => {
@@ -226,7 +347,7 @@ describe('整表重建迁移', () => {
   it('重建中途失败时事务回滚,foreign_keys 仍恢复为开', () => {
     // 故意让旧表缺 skill 列:rebuildSql 的 INSERT ... SELECT 会失败
     db.exec(`
-      CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '新对话');
+      CREATE TABLE conversations (id VARCHAR(36) PRIMARY KEY, title VARCHAR(255) NOT NULL DEFAULT '新对话');
       CREATE TABLE messages (
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -257,10 +378,24 @@ describe('整表重建迁移', () => {
     expect(createSqlOf(db, 'messages_new')).toBeUndefined()
   })
 
-  it('needRebuild 只看 CHECK 里有没有 tool', () => {
+  it('needRebuild 看 CHECK 与列类型:两者都是新的才跳过', () => {
     const rebuild = tableRebuilds.find((r) => r.table === 'messages')
-    expect(rebuild?.needRebuild("CHECK(role IN ('user','assistant','system'))")).toBe(true)
-    expect(rebuild?.needRebuild("CHECK(role IN ('user','assistant','system','tool'))")).toBe(false)
+    expect(
+      rebuild?.needRebuild("role TEXT NOT NULL CHECK(role IN ('user','assistant','system'))")
+    ).toBe(true)
+    // CHECK 里已有 tool 但列还是 TEXT:这一版仍要重建
+    expect(
+      rebuild?.needRebuild("role TEXT NOT NULL CHECK(role IN ('user','assistant','system','tool'))")
+    ).toBe(true)
+    expect(
+      rebuild?.needRebuild(
+        "id VARCHAR(36) PRIMARY KEY, role VARCHAR(16) CHECK(role IN ('user','assistant','system','tool'))"
+      )
+    ).toBe(false)
+
+    const conversations = tableRebuilds.find((r) => r.table === 'conversations')
+    expect(conversations?.needRebuild('id TEXT PRIMARY KEY, title TEXT NOT NULL')).toBe(true)
+    expect(conversations?.needRebuild('id VARCHAR(36) PRIMARY KEY, title VARCHAR(255)')).toBe(false)
   })
 })
 
@@ -308,8 +443,31 @@ describe('SCHEMA 与迁移清单的一致性', () => {
   })
 
   it('重建 SQL 的列清单与新表完全一致', () => {
-    const rebuild = tableRebuilds.find((r) => r.table === 'messages')
-    const inserted = rebuild?.rebuildSql.match(/INSERT INTO messages_new \(([^)]*)\)/)?.[1]
-    expect(inserted?.split(',').map((s) => s.trim())).toEqual(declaredColumns('messages'))
+    for (const table of ['conversations', 'messages']) {
+      const rebuild = tableRebuilds.find((r) => r.table === table)
+      const inserted = rebuild?.rebuildSql.match(
+        new RegExp(`INSERT INTO ${table}_new \\(([^)]*)\\)`)
+      )?.[1]
+      expect(
+        inserted?.split(',').map((s) => s.trim()),
+        table
+      ).toEqual(declaredColumns(table))
+    }
+  })
+
+  it('短字段声明成 VARCHAR,长文本与 JSON 留在 TEXT;索引不再创建', () => {
+    db.exec(initSql)
+    const conversations = createSqlOf(db, 'conversations') ?? ''
+    const messages = createSqlOf(db, 'messages') ?? ''
+    expect(conversations).toMatch(/id\s+VARCHAR\(36\) PRIMARY KEY/)
+    expect(conversations).toMatch(/title\s+VARCHAR\(255\)/)
+    expect(conversations).toMatch(/summary\s+TEXT/)
+    expect(conversations).toMatch(/workspace\s+TEXT/)
+    expect(messages).toMatch(/conversation_id\s+VARCHAR\(36\)/)
+    expect(messages).toMatch(/role\s+VARCHAR\(16\)/)
+    expect(messages).toMatch(/content\s+TEXT/)
+    expect(messages).toMatch(/tool_calls\s+TEXT/)
+    expect(messages).toMatch(/model\s+VARCHAR\(128\)/)
+    expect(indexNames(db)).not.toContain('idx_messages_conversation_created')
   })
 })
